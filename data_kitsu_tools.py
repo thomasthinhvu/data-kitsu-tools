@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.05"
+APP_VERSION = "1.06"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -614,6 +614,10 @@ class MainWindow(QMainWindow):
         self._expanded: set = set()
         self._preview_cache: dict = {}      # (copy_from, shot name) -> Path or None
         self._preview_worker = None
+        self._progress_block = None         # log line that is updated while copying
+        self._progress_prefix = ""
+        self._progress_total = 0
+        self._progress_stamp = ""
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._run_preview_search)
@@ -1234,16 +1238,32 @@ class MainWindow(QMainWindow):
                  "the shot re-copied with overwrite on the next START.")
 
     # ---------- worker callbacks (run in the GUI thread) ----------
-    def _on_shot_started(self, index: int, _total: int):
+    def _set_log_line(self, block, text: str):
+        """Replace the text of one log line in place (used for live copy progress)."""
+        if block is None or not block.isValid():
+            return
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.insertText(f"{self._progress_stamp}  {text}")
+
+    def _on_shot_started(self, index: int, total: int):
         shot = self.shots[index]
         shot.state = "copying"
         shot.done = 0
         self._refresh_row(index)
-        self.log(f"Copying {shot.name} ({_total} file(s))")
+        self._progress_stamp = time.strftime("%H:%M:%S")
+        self._progress_prefix = f"Copying {shot.name}"
+        self._progress_total = total
+        self.log(f"{self._progress_prefix} (0/{total} file(s))")
+        self._progress_block = self.log_view.document().lastBlock()
 
     def _on_shot_progress(self, index: int, done: int):
-        self.shots[index].done = done
+        shot = self.shots[index]
+        shot.done = done
         self._refresh_row(index)
+        self._set_log_line(self._progress_block,
+                           f"{self._progress_prefix} ({done}/{self._progress_total} file(s))")
 
     def _on_shot_finished(self, index: int, result: str):
         shot = self.shots[index]
@@ -1253,7 +1273,10 @@ class MainWindow(QMainWindow):
         elif result == "partial":
             shot.force_overwrite = True
         self._refresh_row(index)
-        self.log(f"{shot.name}: {result}")
+        label = {"done": "done", "partial": "stopped", "error": "finished with errors"}.get(result, result)
+        self._set_log_line(self._progress_block,
+                           f"{self._progress_prefix} ({shot.done}/{self._progress_total} file(s)) - {label}")
+        self._progress_block = None
 
     def _on_worker_finished(self):
         stopped = self.worker.stop_event.is_set() if self.worker else False
