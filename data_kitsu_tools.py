@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.17"
+APP_VERSION = "1.18"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -830,9 +830,24 @@ class ShotTree(QTreeWidget):
 MAX_RUN_FOLDERS = 100                    # older run folders are deleted
 
 
+LOG_DIR = Path(__file__).resolve().parent / "run_logs"    # inside the project, easy to clean
+
+
 def data_dir() -> Path:
-    """Folder that holds the session, the app log, run records and history."""
+    """Per-user data folder (session file). Used for run records only if LOG_DIR is not writable."""
     return session_file().parent
+
+
+def log_dir() -> Path:
+    """Folder for the app log, run records and history: LOG_DIR, else the per-user folder."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        probe = LOG_DIR / ".write_test"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return LOG_DIR
+    except OSError:
+        return data_dir()
 
 
 def setup_app_log() -> logging.Logger:
@@ -842,7 +857,7 @@ def setup_app_log() -> logging.Logger:
     logger.propagate = False
     if not logger.handlers:
         try:
-            path = data_dir() / "logs" / "app.log"
+            path = log_dir() / "app.log"
             path.parent.mkdir(parents=True, exist_ok=True)
             handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=5,
                                           encoding="utf-8")
@@ -864,7 +879,7 @@ class RunRecorder:
         self.config = dict(config, app_version=APP_VERSION, python=sys.version.split()[0],
                            platform=sys.platform, buffer_mb=BUFFER_SIZE // (1024 * 1024))
         self.t0 = time.time()
-        self.dir = data_dir() / "runs" / time.strftime("%Y%m%d_%H%M%S", time.localtime(self.t0))
+        self.dir = log_dir() / "runs" / time.strftime("%Y%m%d_%H%M%S", time.localtime(self.t0))
         self.dir.mkdir(parents=True, exist_ok=True)
         self._samples = open(self.dir / "samples.csv", "w", newline="", encoding="utf-8")
         self._files = open(self.dir / "files.csv", "w", newline="", encoding="utf-8")
@@ -882,7 +897,7 @@ class RunRecorder:
 
     @staticmethod
     def _prune():
-        runs = sorted((data_dir() / "runs").glob("*"))
+        runs = sorted((log_dir() / "runs").glob("*"))
         for old in runs[:-MAX_RUN_FOLDERS]:
             shutil.rmtree(old, ignore_errors=True)
 
@@ -925,7 +940,7 @@ class RunRecorder:
                                                encoding="utf-8")
         self._samples.close()
         self._files.close()
-        history = data_dir() / "history.csv"
+        history = log_dir() / "history.csv"
         is_new = not history.exists()
         with open(history, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -1104,10 +1119,10 @@ class AboutDialog(QDialog):
     @staticmethod
     def _open_logs():
         try:
-            data_dir().mkdir(parents=True, exist_ok=True)
+            log_dir().mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir())))
 
 
 class MainWindow(QMainWindow):

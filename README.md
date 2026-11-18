@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.18:** the run records and app log go to the `run_logs/` folder inside the project, so they are easy to clean up (the folder is git-ignored). If that folder cannot be written, they go to the per-user data folder instead.
   - **Version 1.17:** the app keeps records for later analysis, in its data folder (*Open log folder* in the INFO window): `logs/app.log` (every log line, rotating), `history.csv` (one line per run: duration, speed, threads, errors, buffer size, paths), and `runs/<time>/` with `samples.csv` (every second: MB/s, active time, files, threads), `files.csv` (every file: size, seconds, MB/s, result, error) and `summary.json`. The last 100 run folders are kept.
   - **Version 1.16:** before a copy starts, the app checks the destination (writable, enough free space, shows the space needed) and warns about empty source files, paths longer than 250 characters, and unfinished `.part` files. Blocks the copy when there is not enough space. An existing file is now skipped only when its size matches; a short file is copied again. Files are flushed to disk before they are renamed. New **THREADS / SHOT** setting (1-16, default 4) for network drives.
   - **Version 1.15:** yellow and red shots write their log lines (reason and path) in yellow or red, so they are easy to follow.

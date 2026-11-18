@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.18:** dữ liệu lưu (log, lịch sử, thư mục run) được ghi vào thư mục `run_logs/` trong dự án để dễ dọn dẹp (thư mục này được git bỏ qua). Nếu không ghi được vào đó thì dùng thư mục dữ liệu riêng của người dùng.
   - **Version 1.17:** app tự lưu dữ liệu để phân tích sau (nút *Open log folder* trong cửa sổ INFO): `logs/app.log` (mọi dòng log, tự xoay vòng), `history.csv` (mỗi lượt chạy một dòng: thời gian, tốc độ, số luồng, lỗi, buffer, đường dẫn), và `runs/<giờ>/` gồm `samples.csv` (mỗi giây: MB/s, active time, số file, số luồng), `files.csv` (từng file: dung lượng, thời gian, MB/s, kết quả, lỗi) và `summary.json`. Giữ 100 thư mục run gần nhất.
   - **Version 1.16:** trước khi copy, app kiểm tra đích (có ghi được không, đủ dung lượng trống không, hiện dung lượng cần) và cảnh báo file nguồn rỗng, đường dẫn dài hơn 250 ký tự, file `.part` còn dở. Chặn copy nếu không đủ dung lượng. File đã có chỉ được bỏ qua khi size khớp; file bị cụt sẽ được copy lại. File được ghi xuống đĩa trước khi đổi tên. Thêm cài đặt **THREADS / SHOT** (1-16, mặc định 4) cho ổ mạng.
   - **Version 1.15:** các dòng log của shot vàng và đỏ (lý do và đường dẫn) được tô màu vàng hoặc đỏ để dễ theo dõi.
