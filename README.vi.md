@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.13:** tiêu đề cửa sổ hiện tên tác giả (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). Nút **ABOUT ME** (góc dưới bên phải) mở cửa sổ có link liên hệ (ArtStation, LinkedIn, Facebook, Gmail) và mã QR donation đủ lớn để quét.
   - **Version 1.12:** hai ô thông số bên cạnh ADD / REMOVE / CLEAR hiển thị **active time** (% thời gian đĩa đang làm việc) và **tốc độ copy** (MB/s), có biểu đồ 60 giây. Shot đã có đủ file ở đích sẽ có màu vàng, cột version hiển thị phiên bản đang có ở đích kèm `-copied` (ví dụ `v02-copied`) và bị bỏ qua trừ khi bật OVERWRITE hoặc Force copy. Shot vàng và đỏ giờ ghi lý do và đường dẫn vào log, tooltip cũng hiện cùng lý do.
   - **Version 1.11:** shot đã bật **Force copy** hiển thị màu bình thường thay vì màu đỏ.
   - **Version 1.10:** chuột phải vào shot và chọn **Force copy** để copy shot có số frame khác số frame mong đợi. Các file đã có sẽ bị ghi đè. Bỏ tick để quay lại trạng thái bỏ qua shot.

@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.13:** the window title shows the author (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). New **ABOUT ME** button (bottom right) opens a window with the contact links (ArtStation, LinkedIn, Facebook, Gmail) and the donation QR code, large enough to scan.
   - **Version 1.12:** two live readouts beside ADD / REMOVE / CLEAR show the **active time** (% of time disk I/O is running) and the **transfer rate** (MB/s), with a 60-second graph. A shot whose files already exist on the destination is yellow, shows the version found there with `-copied` (e.g. `v02-copied`) and is skipped unless OVERWRITE or Force copy is on. Yellow and red shots now log the reason and the path, and their tooltip gives the same reason.
   - **Version 1.11:** a shot marked **Force copy** shows in the normal colour instead of red.
   - **Version 1.10:** right-click a shot and choose **Force copy** to copy a shot whose frame count differs from the expected count. Its existing files are overwritten. Untick it to go back to skipping the shot.

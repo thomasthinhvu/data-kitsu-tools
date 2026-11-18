@@ -29,19 +29,33 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPointF, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QPainter, QPalette, QPen,
-                          QPolygonF, QTextCursor)
+from PySide6.QtCore import QByteArray, QPointF, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen,
+                          QPixmap, QPolygonF, QTextCursor)
 from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
+    QDialog, QToolButton,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
+AUTHOR = "Thomas Thinh Vu"
+DONATE_QR = Path(__file__).resolve().parent / "assets" / "donate_qr.png"
+# (kind for the icon, text shown, link opened)
+CONTACTS = [
+    ("artstation", "https://thomasvfx.artstation.com/", "https://thomasvfx.artstation.com/"),
+    ("linkedin", "https://www.linkedin.com/in/thinh-vu-376534106/",
+     "https://www.linkedin.com/in/thinh-vu-376534106/"),
+    ("facebook", "https://www.facebook.com/thinhvuvfx/", "https://www.facebook.com/thinhvuvfx/"),
+    ("gmail", "thomasvuvfx@gmail.com", "mailto:thomasvuvfx@gmail.com"),
+]
+BRAND_COLORS = {"artstation": "#13aff0", "linkedin": "#0a66c2",
+                "facebook": "#1877f2", "gmail": "#ea4335"}
+BRAND_LETTERS = {"artstation": "A", "linkedin": "in", "facebook": "f"}
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -784,10 +798,87 @@ class StatCell(QFrame):
         painter.end()
 
 
+def brand_icon(kind: str, size: int = 36) -> QIcon:
+    """Rounded brand-coloured square with a letter (or an envelope for Gmail)."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(BRAND_COLORS[kind]))
+    painter.drawRoundedRect(0.0, 0.0, float(size), float(size), size * 0.22, size * 0.22)
+    if kind == "gmail":
+        painter.setBrush(QColor("white"))
+        painter.drawRoundedRect(size * 0.2, size * 0.3, size * 0.6, size * 0.44, 2.0, 2.0)
+        pen = QPen(QColor(BRAND_COLORS[kind]))
+        pen.setWidthF(max(1.5, size / 16))
+        painter.setPen(pen)
+        painter.drawLine(QPointF(size * 0.2, size * 0.3), QPointF(size * 0.5, size * 0.56))
+        painter.drawLine(QPointF(size * 0.8, size * 0.3), QPointF(size * 0.5, size * 0.56))
+    else:
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(int(size * 0.5))
+        painter.setFont(font)
+        painter.setPen(QColor("white"))
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, BRAND_LETTERS[kind])
+    painter.end()
+    return QIcon(pix)
+
+
+class AboutDialog(QDialog):
+    """About window: author name, contact links with icons, and the donation QR code."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(10)
+
+        name = QLabel(AUTHOR)
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name.setStyleSheet("font-size: 20px; font-weight: bold;")
+        layout.addWidget(name)
+
+        for kind, text, url in CONTACTS:
+            row = QHBoxLayout()
+            button = QToolButton()
+            button.setIcon(brand_icon(kind))
+            button.setIconSize(QSize(36, 36))
+            button.setAutoRaise(True)
+            button.setToolTip(url)
+            button.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+            link = QLabel(f'<a href="{url}">{text}</a>')
+            link.setOpenExternalLinks(True)
+            row.addWidget(button)
+            row.addWidget(link, 1)
+            layout.addLayout(row)
+
+        layout.addSpacing(10)
+        donate = QLabel("Donate: scan with the Binance app")
+        donate.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        donate.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(donate)
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pix = QPixmap(str(DONATE_QR))
+        if pix.isNull():
+            qr.setText(f"QR image not found:\n{DONATE_QR}")
+        else:
+            qr.setPixmap(pix.scaled(QSize(420, 420), Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+        layout.addWidget(qr)
+
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION} by {AUTHOR}")
         self.resize(1480, 860)
         self.shots: list = []
         self.items: dict = {}
@@ -992,6 +1083,9 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumHeight(140)
         outer.addWidget(self.progress)
         outer.addWidget(self.log_view)
+        about = QPushButton("ABOUT ME")
+        about.clicked.connect(self.show_about)
+        self.statusBar().addPermanentWidget(about)
 
     @staticmethod
     def _mode_button(text: str) -> QPushButton:
@@ -1277,6 +1371,9 @@ class MainWindow(QMainWindow):
         act_copy.triggered.connect(lambda _=False: self.copy_path(path))
         act_remove.triggered.connect(lambda _=False: self.remove_selected())
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def show_about(self):
+        AboutDialog(self).exec()
 
     def set_force_copy(self, index: int, checked: bool):
         shot = self.shots[index]
