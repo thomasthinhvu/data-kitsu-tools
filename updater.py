@@ -23,6 +23,8 @@ from pathlib import Path
 REPO_OWNER = "thomasthinhvu"
 REPO_NAME = "data-kitsu-tools"
 BRANCH = "main"
+API_VERSION_URL = (f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+                   f"/contents/VERSION?ref={BRANCH}")
 RAW_VERSION_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/VERSION"
 ZIP_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/archive/refs/heads/{BRANCH}.zip"
 APP_DIR = Path(__file__).resolve().parent
@@ -41,11 +43,22 @@ def parse_version(text: str) -> tuple:
 
 def fetch_latest_version():
     """Return the version string on GitHub, or None when GitHub cannot be reached."""
-    try:
-        with urllib.request.urlopen(RAW_VERSION_URL, timeout=TIMEOUT) as resp:
-            return resp.read().decode("utf-8").strip()
-    except Exception:
-        return None
+    # The API is tried first; the raw URL is a fallback.
+    requests = [
+        urllib.request.Request(API_VERSION_URL, headers={
+            "Accept": "application/vnd.github.raw",
+            "User-Agent": "data-kitsu-tools-updater"}),
+        urllib.request.Request(RAW_VERSION_URL, headers={"User-Agent": "data-kitsu-tools-updater"}),
+    ]
+    for req in requests:
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                text = resp.read().decode("utf-8").strip()
+            if re.fullmatch(r"\d+(\.\d+)*", text):
+                return text
+        except Exception:
+            continue
+    return None
 
 
 def install_requirements():
