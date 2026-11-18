@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.05:** bỏ khung DROP CSV bên trái; khi SHOTS LIST trống thì hiện hướng dẫn kéo thả / click ngay trong danh sách. Hai ô COPY FROM và PASTE TO cao gấp đôi để kéo thả dễ hơn.
   - **Version 1.04:** nút trong danh sách shot theo thứ tự ADD / REMOVE / CLEAR, xóa một shot không hỏi lại nữa, và Open in Explorer / Copy path đã hoạt động cho mọi shot (tự tìm folder khi cần).
   - **Version 1.03:** Ô xem trước COPY FROM / PASTE TO hiện full path của shot đầu tiên (tìm trong nền trước khi scan).
   - **Version 1.02:** Nút CLEAR / ADD / REMOVE trong danh sách shot, menu chuột phải (Open in Explorer, Copy path, Remove), và căn chỉnh lại các nút chế độ và nút điều khiển.

@@ -30,14 +30,14 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.04"
+APP_VERSION = "1.05"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -546,56 +546,43 @@ class PathEdit(QLineEdit):
             event.acceptProposedAction()
 
 
-class DropZone(QFrame):
-    """DROP CSV FILE box: drag a CSV onto it or click to browse."""
-    clicked = Signal()
-    dropped = Signal(list)
-
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("dropZone")
-        self.setAcceptDrops(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(90)
-        self.setStyleSheet("#dropZone { border: 2px dashed #7a7f87; border-radius: 6px; }")
-        layout = QVBoxLayout(self)
-        label = QLabel("DROP CSV FILE\n(or click to browse)")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("font-size: 20px; font-weight: bold; border: none;")
-        layout.addWidget(label)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
-
-    def dragEnterEvent(self, event):
-        if local_paths(event.mimeData()):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    dragMoveEvent = dragEnterEvent
-
-    def dropEvent(self, event):
-        self.dropped.emit(local_paths(event.mimeData()))
-        event.acceptProposedAction()
-
-
 class ShotTree(QTreeWidget):
     """SHOTS LIST. Accepts dropped folders (new shots) and CSV files (more shots)."""
     dropped = Signal(list)
     deletePressed = Signal()
+    emptyClicked = Signal()                 # user clicked the empty-list hint
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self._hint = QLabel("DROP CSV FILE\n(or click to browse)", self)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._hint.setStyleSheet(
+            "font-size: 20px; font-weight: bold; background: transparent;"
+            "border: 2px dashed #7a7f87; border-radius: 6px;")
+
+    def set_hint(self, visible: bool):
+        self._hint.setVisible(visible)
+        self._place_hint()
+
+    def _place_hint(self):
+        self._hint.setGeometry(self.viewport().geometry().adjusted(12, 12, -12, -12))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_hint()
+
+    def mousePressEvent(self, event):
+        if self.topLevelItemCount() == 0 and event.button() == Qt.MouseButton.LeftButton:
+            self.emptyClicked.emit()
+        super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete:
             self.deletePressed.emit()
             return
         super().keyPressEvent(event)
-
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event):
         if local_paths(event.mimeData()):
@@ -635,6 +622,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._update_previews()
         self._update_controls()
+        self.refresh_tree()
         self.log(f"{APP_NAME} {APP_VERSION} ready. Drop a CSV file to start.")
 
     # ---------- layout ----------
@@ -649,19 +637,17 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout()
         body.addLayout(left, 0)
 
-        self.drop_zone = DropZone()
-        self.drop_zone.clicked.connect(self.browse_csv)
-        self.drop_zone.dropped.connect(self.on_csv_dropped)
-        left.addWidget(self.drop_zone)
-
         paths_box = QGroupBox()
         grid = QGridLayout(paths_box)
-        self.copy_edit = PathEdit("Source folder, e.g. W:\\_PROJECTS\\...\\FILM")
+        self.copy_edit = PathEdit("Drag a source folder here, or type the path")
         self.copy_btn = QPushButton("...")
         self.copy_btn.setFixedWidth(44)
-        self.paste_edit = PathEdit("Destination folder")
+        self.paste_edit = PathEdit("Drag a destination folder here, or type the path")
         self.paste_btn = QPushButton("...")
         self.paste_btn.setFixedWidth(44)
+        path_height = self.copy_edit.sizeHint().height() * 2
+        for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn):
+            w.setFixedHeight(path_height)
         self.copy_preview = QLabel()
         self.paste_preview = QLabel()
         for lab in (self.copy_preview, self.paste_preview):
@@ -790,6 +776,7 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
         self.tree.deletePressed.connect(self.remove_selected)
+        self.tree.emptyClicked.connect(self.browse_csv)
 
         # Bottom: progress and log
         self.progress = QProgressBar()
@@ -885,7 +872,6 @@ class MainWindow(QMainWindow):
         self.btn_clear.setEnabled(not busy)
         self.btn_remove.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
-        self.drop_zone.setEnabled(not self._running)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
                   self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
                   *self.local_checks.values(), *self.publish_checks.values()):
@@ -904,13 +890,6 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text().strip())
         if folder:
             edit.setText(folder)
-
-    def on_csv_dropped(self, paths: list):
-        csvs = [p for p in paths if p.suffix.lower() == ".csv"]
-        if csvs:
-            self.load_csv_path(csvs[0], replace=True)
-        else:
-            self.log("Please drop a .csv file here.")
 
     def load_csv_path(self, path: Path, replace: bool):
         if self._busy():
@@ -1085,6 +1064,7 @@ class MainWindow(QMainWindow):
     def refresh_tree(self):
         self.tree.clear()
         self.items = {}
+        self.tree.set_hint(not self.shots)
         for i, shot in enumerate(self.shots):
             top = QTreeWidgetItem(self.tree)
             top.setData(0, Qt.ItemDataRole.UserRole, shot.name)

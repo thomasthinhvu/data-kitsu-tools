@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.05:** removed the left DROP CSV box; the empty SHOTS LIST now shows the drop / click hint instead. COPY FROM and PASTE TO fields are twice as tall to make drag and drop easier.
   - **Version 1.04:** shot list buttons ordered ADD / REMOVE / CLEAR, removing one shot no longer asks for confirmation, and Open in Explorer / Copy path now work for any shot (they find the folder when needed).
   - **Version 1.03:** COPY FROM / PASTE TO previews show the full path of the first shot (found in the background before a scan).
   - **Version 1.02:** Shot list buttons CLEAR / ADD / REMOVE, right-click menu (Open in Explorer, Copy path, Remove), and aligned mode and action buttons.
