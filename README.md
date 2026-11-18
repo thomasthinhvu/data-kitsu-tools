@@ -13,6 +13,8 @@ A tool that copies shot data for a Kitsu pipeline. It reads the shot list from a
 - **Read Kitsu CSV**: drag and drop, or click the *DROP CSV FILE* box, to load the shot list (the `Name` and `Frames` columns).
   Supports `;` or `,` separators, UTF-8, cp1258 (Vietnamese) and UTF-16.
 - **Shots List**: shows NO, NAME, VERSION, FRAMES, STATUS. You can drag more shot folders or CSV files into the list while a copy is running.
+  - Buttons under the list: **CLEAR** (empty the list), **ADD** (add a shot folder or type a shot name), **REMOVE** (remove the selected shots; Delete key works too).
+  - Right-click a shot: **Open in Explorer**, **Copy path**, **Remove**.
 - **Scan before copying**:
   - Finds the shot folders by name at any depth under COPY FROM.
   - Compares the real frame count with the Frames column. If they differ, the row turns red and the shot is skipped.
@@ -87,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.02:** Shot list buttons CLEAR / ADD / REMOVE, right-click menu (Open in Explorer, Copy path, Remove), and aligned mode and action buttons.
   - **Version 1.01:** versioning rule (same-day edits = 1.0N, next day = 1.1, then 1.1.N). Updater now compares versions in this order.
   - **Version 1.0:** first named version. Shown in the window title and in the `VERSION` file.
   - **Updater:** `updater.py` checks GitHub on each launch and shows an update notice. Answer `y` to update to the latest version from GitHub (git pull, or a zip download if the folder is not a git clone). Use `--no-update` to skip the check.

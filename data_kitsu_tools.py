@@ -27,17 +27,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QColor, QPalette
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.01"
+APP_VERSION = "1.02"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -70,6 +70,8 @@ C_GREY = "#8a8f98"
 C_ORANGE = "#ff9f43"
 
 COLUMNS = 5
+ROLE_INDEX = int(Qt.ItemDataRole.UserRole) + 1   # shot index stored on top rows
+ROLE_PATH = int(Qt.ItemDataRole.UserRole) + 2    # folder path stored on variant rows
 
 
 # ----------------------------------------------------------------------------
@@ -556,6 +558,13 @@ class DropZone(QFrame):
 class ShotTree(QTreeWidget):
     """SHOTS LIST. Accepts dropped folders (new shots) and CSV files (more shots)."""
     dropped = Signal(list)
+    deletePressed = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            self.deletePressed.emit()
+            return
+        super().keyPressEvent(event)
 
     def __init__(self):
         super().__init__()
@@ -641,35 +650,42 @@ class MainWindow(QMainWindow):
         self.paste_btn.clicked.connect(lambda: self.browse_dir(self.paste_edit))
 
         row = QHBoxLayout()
+        row.setSpacing(12)
         left.addLayout(row)
 
         # LOCAL box
         local_box = QGroupBox()
         lv = QVBoxLayout(local_box)
-        self.btn_local = QPushButton("LOCAL")
-        self.btn_local.setMinimumHeight(44)
+        lv.setSpacing(10)
+        self.btn_local = self._mode_button("LOCAL")
         self.btn_local.clicked.connect(lambda: self.start_scan(MODE_LOCAL))
         lv.addWidget(self.btn_local)
         self.local_checks = self._type_checks(LOCAL_TYPE_KEYS, lv)
-        row.addWidget(local_box)
+        lv.addStretch(1)
+        row.addWidget(local_box, 1)
 
         # PUBLISH box
         publish_box = QGroupBox()
         pv = QVBoxLayout(publish_box)
-        self.btn_publish = QPushButton("PUBLISH")
-        self.btn_publish.setMinimumHeight(44)
+        pv.setSpacing(10)
+        self.btn_publish = self._mode_button("PUBLISH")
         self.btn_publish.clicked.connect(lambda: self.start_scan(MODE_PUBLISH))
         pv.addWidget(self.btn_publish)
         self.chk_dailies = QCheckBox("MAKE DAILIES FOLDER")
         self.chk_dailies.toggled.connect(self._update_previews)
         pv.addWidget(self.chk_dailies)
         self.publish_checks = self._type_checks(PUBLISH_TYPE_KEYS, pv)
-        row.addWidget(publish_box)
+        pv.addStretch(1)
+        row.addWidget(publish_box, 1)
 
         # COPY MODE box
         mode_box = QGroupBox()
         mv = QVBoxLayout(mode_box)
-        mv.addWidget(QLabel("COPY MODE"))
+        mv.setSpacing(10)
+        mode_title = QLabel("COPY MODE")
+        mode_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mode_title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        mv.addWidget(mode_title)
         self.chk_skip = QCheckBox("SKIP MODE")
         self.chk_skip.setChecked(True)
         self.chk_overwrite = QCheckBox("OVERWRITE")
@@ -678,20 +694,22 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.chk_skip)
         mv.addWidget(self.chk_overwrite)
         mv.addWidget(self.chk_skip_sys)
+        mv.addStretch(1)
         self.chk_skip.toggled.connect(self._on_skip_toggled)
         self.chk_overwrite.toggled.connect(self._on_overwrite_toggled)
-        row.addWidget(mode_box)
+        row.addWidget(mode_box, 1)
 
-        # Action buttons
-        actions = QVBoxLayout()
-        self.btn_start = QPushButton("START")
-        self.btn_pause = QPushButton("PAUSE")
-        self.btn_stop = QPushButton("STOP")
+        # Action buttons: same size, stacked in one box
+        actions_box = QGroupBox()
+        av = QVBoxLayout(actions_box)
+        av.setSpacing(10)
+        self.btn_start = self._action_button("START")
+        self.btn_pause = self._action_button("PAUSE")
+        self.btn_stop = self._action_button("STOP")
         for b in (self.btn_start, self.btn_pause, self.btn_stop):
-            b.setMinimumSize(130, 52)
-            actions.addWidget(b)
-        actions.addStretch(1)
-        row.addLayout(actions)
+            av.addWidget(b)
+        av.addStretch(1)
+        row.addWidget(actions_box, 0)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_pause.clicked.connect(self.on_pause)
         self.btn_stop.clicked.connect(self.on_stop)
@@ -721,6 +739,26 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(4, 120)
         right.addWidget(self.tree, 1)
 
+        tree_buttons = QHBoxLayout()
+        self.btn_clear = QPushButton("CLEAR")
+        self.btn_clear.clicked.connect(self.clear_shots)
+        self.btn_add = QPushButton("ADD")
+        add_menu = QMenu(self.btn_add)
+        add_menu.addAction("Add shot folder...", self.add_folder_shot)
+        add_menu.addAction("Add shot by name...", self.add_named_shot)
+        self.btn_add.setMenu(add_menu)
+        self.btn_remove = QPushButton("REMOVE")
+        self.btn_remove.clicked.connect(self.remove_selected)
+        for b in (self.btn_clear, self.btn_add, self.btn_remove):
+            b.setMinimumHeight(34)
+            tree_buttons.addWidget(b)
+        tree_buttons.addStretch(1)
+        right.addLayout(tree_buttons)
+
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
+        self.tree.deletePressed.connect(self.remove_selected)
+
         # Bottom: progress and log
         self.progress = QProgressBar()
         self.progress.setFormat("%v / %m files")
@@ -731,6 +769,20 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumHeight(140)
         outer.addWidget(self.progress)
         outer.addWidget(self.log_view)
+
+    @staticmethod
+    def _mode_button(text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setMinimumHeight(44)
+        button.setStyleSheet("font-size: 14px; font-weight: bold;")
+        return button
+
+    @staticmethod
+    def _action_button(text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setMinimumSize(150, 46)
+        button.setStyleSheet("font-size: 14px; font-weight: bold;")
+        return button
 
     def _type_checks(self, keys, layout) -> dict:
         grid = QGridLayout()
@@ -798,6 +850,9 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(not busy)
         self.btn_pause.setEnabled(self._running)
         self.btn_stop.setEnabled(self._running)
+        self.btn_clear.setEnabled(not busy)
+        self.btn_remove.setEnabled(not busy)
+        self.btn_add.setEnabled(not self._scanning)
         self.drop_zone.setEnabled(not self._running)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
                   self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
@@ -863,18 +918,127 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
         self._update_previews()
 
+    # ---------- add / remove / clear / context menu ----------
+    def add_folder_shot(self):
+        if self._scanning:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Select a shot folder")
+        if folder:
+            self.on_tree_dropped([Path(folder)])
+
+    def add_named_shot(self):
+        if self._scanning:
+            return
+        name, ok = QInputDialog.getText(self, APP_NAME, "Shot name (e.g. HHCC_SC07_0250):")
+        name = name.strip() if ok else ""
+        if not name:
+            return
+        if "/" in name or "\\" in name:
+            QMessageBox.warning(self, APP_NAME, "Shot name cannot contain / or \\.")
+            return
+        if any(s.name == name for s in self.shots):
+            self.log(f"Shot {name} is already in the list.")
+            return
+        frames, ok = QInputDialog.getInt(self, APP_NAME, f"Frames for {name}:", 0, 0, 1000000)
+        if not ok:
+            return
+        self.shots.append(Shot(name=name, frames=frames))
+        self.log(f"Added shot {name} ({frames} frames)")
+        self.refresh_tree()
+        self._update_previews()
+
+    def remove_selected(self):
+        if self._busy():
+            self.log("Cannot remove shots while scanning or copying.")
+            return
+        indices = set()
+        for item in self.tree.selectedItems():
+            owner = item if item.parent() is None else item.parent()
+            index = owner.data(1, ROLE_INDEX)
+            if index is not None:
+                indices.add(index)
+        if not indices:
+            self.log("Select one or more shots first.")
+            return
+        names = [self.shots[i].name for i in sorted(indices)]
+        preview = "\n".join(names[:10]) + ("\n..." if len(names) > 10 else "")
+        answer = QMessageBox.question(self, APP_NAME,
+                                      f"Remove {len(indices)} shot(s) from the list?\n\n{preview}")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for index in sorted(indices, reverse=True):
+            del self.shots[index]
+        self.log(f"Removed {len(indices)} shot(s)")
+        self.refresh_tree()
+        self._update_previews()
+
+    def clear_shots(self):
+        if self._busy() or not self.shots:
+            return
+        answer = QMessageBox.question(self, APP_NAME, "Clear the whole shot list?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.shots = []
+        self.scan_config = None
+        self.current_mode = MODE_LOCAL
+        self._expanded.clear()
+        self.log("Shot list cleared.")
+        self.refresh_tree()
+        self._update_previews()
+
+    def _item_path(self, item: QTreeWidgetItem):
+        """Folder that a row points to: the variant folder, or the shot's first folder."""
+        if item.parent() is not None:
+            value = item.data(1, ROLE_PATH)
+            return Path(value) if value else None
+        index = item.data(1, ROLE_INDEX)
+        if index is None or index >= len(self.shots):
+            return None
+        scan = self.shots[index].scan
+        return scan.units[0].path if scan and scan.units else None
+
+    def on_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        path = self._item_path(item)
+        menu = QMenu(self)
+        act_open = menu.addAction("Open in Explorer")
+        act_copy = menu.addAction("Copy path")
+        act_open.setEnabled(path is not None)
+        act_copy.setEnabled(path is not None)
+        menu.addSeparator()
+        act_remove = menu.addAction("Remove")
+        act_remove.setEnabled(not self._busy())
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if chosen is act_open:
+            self.open_path(path)
+        elif chosen is act_copy:
+            QApplication.clipboard().setText(str(path))
+            self.log(f"Copied path: {path}")
+        elif chosen is act_remove:
+            self.remove_selected()
+
+    def open_path(self, path: Path):
+        if not path.exists():
+            QMessageBox.warning(self, APP_NAME, f"Folder not found:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def refresh_tree(self):
         self.tree.clear()
         self.items = {}
         for i, shot in enumerate(self.shots):
             top = QTreeWidgetItem(self.tree)
             top.setData(0, Qt.ItemDataRole.UserRole, shot.name)
+            top.setData(1, ROLE_INDEX, i)
             self.items[i] = top
             self._fill_top(top, i, shot)
             if shot.scan and len(shot.scan.units) > 1:
                 for unit in shot.scan.units:
                     child = QTreeWidgetItem(top)
                     child.setText(1, unit.path.name)
+                    child.setData(1, ROLE_PATH, str(unit.path))
                     child.setText(2, unit.label)
                     child.setText(3, str(shot.frames))
                     child.setText(4, f"{unit.found}/{shot.frames}")

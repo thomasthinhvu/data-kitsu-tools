@@ -15,6 +15,8 @@ với đúng cấu trúc folder của nguồn. Không cần cài đặt phức t
 - **Đọc CSV Kitsu**: kéo thả hoặc bấm vào khung *DROP CSV FILE* để nạp danh sách shot (cột `Name` và `Frames`).
   Hỗ trợ dấu `;` hoặc `,`, mã hóa UTF-8, cp1258 (tiếng Việt) và UTF-16.
 - **Shots List**: hiển thị NO, NAME, VERSION, FRAMES, STATUS. Có thể kéo thả thêm folder shot hoặc file CSV mới vào danh sách trong lúc đang copy.
+  - Nút dưới danh sách: **CLEAR** (xóa hết), **ADD** (thêm folder shot hoặc gõ tên shot), **REMOVE** (xóa shot đang chọn; phím Delete cũng được).
+  - Chuột phải vào shot: **Open in Explorer**, **Copy path**, **Remove**.
 - **Scan kiểm tra trước khi copy**:
   - Tìm folder theo tên shot ở mọi cấp sub folder của COPY FROM.
   - Số frame thực tế so với cột Frames. Lệch frame thì dòng chuyển đỏ và shot bị bỏ qua.
@@ -95,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.02:** Nút CLEAR / ADD / REMOVE trong danh sách shot, menu chuột phải (Open in Explorer, Copy path, Remove), và căn chỉnh lại các nút chế độ và nút điều khiển.
   - **Version 1.01:** quy tắc đánh số (cùng ngày = 1.0N, sang ngày mới = 1.1, sau đó 1.1.N). Updater so sánh phiên bản theo thứ tự này.
   - **Version 1.0:** phiên bản đặt tên đầu tiên. Hiện trên tiêu đề cửa sổ và trong file `VERSION`.
   - **Updater:** `updater.py` kiểm tra GitHub mỗi lần mở và hiện thông báo cập nhật. Trả lời `y` để cập nhật bản mới nhất từ GitHub (git pull, hoặc tải zip nếu thư mục không phải git clone). Dùng `--no-update` để bỏ qua kiểm tra.
