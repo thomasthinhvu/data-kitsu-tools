@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Data Kitsu Tools launcher for Linux and macOS.
 # Checks Python and PySide6, installs missing requirements, then starts the GUI.
-# Pass --check to only run the checks (no GUI).
+# Pass --check to only run the checks (no GUI), --no-update to skip the update check.
 set -e
 cd "$(dirname "$0")"
 
 MIN_MAJOR=3
 MIN_MINOR=9
 
-echo "[1/3] Checking Python..."
+echo "[1/4] Checking Python..."
 PY=""
 for cand in python3 python; do
     if command -v "$cand" >/dev/null 2>&1; then
@@ -26,7 +26,14 @@ if ! "$PY" -c "import sys; sys.exit(0 if sys.version_info >= ($MIN_MAJOR, $MIN_M
 fi
 echo "      OK: $("$PY" --version 2>&1) ($PY)"
 
-echo "[2/3] Checking PySide6..."
+echo "[2/4] Checking for updates..."
+if [ "$1" = "--no-update" ] || [ "$2" = "--no-update" ]; then
+    echo "      skipped (--no-update)"
+else
+    "$PY" updater.py || echo "      update check failed, continuing with the local version"
+fi
+
+echo "[3/4] Checking PySide6..."
 if "$PY" -c "import PySide6" >/dev/null 2>&1; then
     echo "      OK: PySide6 is installed"
 else
@@ -43,10 +50,10 @@ else
     echo "      OK: PySide6 installed"
 fi
 
-if [ "$1" = "--check" ]; then
-    echo "[3/3] All checks passed (--check mode, GUI not started)."
+if [ "$1" = "--check" ] || [ "$2" = "--check" ]; then
+    echo "[4/4] All checks passed (--check mode, GUI not started)."
     exit 0
 fi
 
-echo "[3/3] Starting Data Kitsu Tools..."
-exec "$PY" data_kitsu_tools.py "$@"
+echo "[4/4] Starting Data Kitsu Tools..."
+exec "$PY" data_kitsu_tools.py

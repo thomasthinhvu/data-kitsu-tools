@@ -95,7 +95,13 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.0:** phiên bản đặt tên đầu tiên. Hiện trên tiêu đề cửa sổ và trong file `VERSION`.
+  - **Updater:** `updater.py` kiểm tra GitHub mỗi lần mở và hiện thông báo cập nhật. Trả lời `y` để cập nhật bản mới nhất từ GitHub (git pull, hoặc tải zip nếu thư mục không phải git clone). Dùng `--no-update` để bỏ qua kiểm tra.
   - **English README:** thêm `README.en.md` và link chuyển ngôn ngữ ở cả hai README.
   - **Launchers:** thêm `run.cmd` (Windows), `run.sh` và `run.command` (Linux / macOS) để kiểm tra Python, cài PySide6 và mở GUI.
   - **Initial release:** GUI theo mockup, đọc CSV Kitsu, scan LOCAL / PUBLISH, copy có skip / overwrite,
     pause / resume / stop, bỏ qua file hệ thống, màu trạng thái, README.
+
+## Cập nhật
+
+Khi có bản mới trên GitHub, launcher hiện thông báo *UPDATE AVAILABLE*. Trả lời `y` để cập nhật. Launcher sẽ cài các thư viện mới (nếu có) rồi mở phiên bản mới.
