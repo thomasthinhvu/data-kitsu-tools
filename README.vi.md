@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.09:** lưu cài đặt, shot list (kèm trạng thái done/partial) và log khi thoát và mỗi 20 giây, rồi khôi phục ở lần mở sau. Shot đang copy dở khi đóng app sẽ trở lại trạng thái partial và được copy lại với overwrite.
   - **Version 1.08:** scan khớp folder có hoặc không có nhãn reel (`HHCC_R1_SC04_020_Tom_comp_v03` khớp shot `HHCC_SC04_020`), nên PUBLISH tìm được các shot này thay vì báo thiếu. Đã thêm test cho việc này.
   - **Version 1.07:** log copy chỉ dùng một dòng cho cả lượt, chỉ thay đổi số (ví dụ `Copying HHCC_TLR_030 (17/42 file(s))`).
   - **Version 1.06:** log copy hiện một dòng cho mỗi shot được cập nhật trực tiếp, ví dụ `Copying HHCC_TLR_030 (0/42 file(s))` tăng dần tới `42/42`, rồi kết thúc bằng `- done`.

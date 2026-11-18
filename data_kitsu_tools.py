@@ -15,6 +15,7 @@ Requires Python 3.9+ and PySide6. Runs on Windows, macOS and Linux.
 from __future__ import annotations
 
 import csv
+import json
 import datetime as dt
 import io
 import os
@@ -27,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog,
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.08"
+APP_VERSION = "1.09"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -72,6 +73,14 @@ C_ORANGE = "#ff9f43"
 COLUMNS = 5
 ROLE_INDEX = int(Qt.ItemDataRole.UserRole) + 1   # shot index stored on top rows
 ROLE_PATH = int(Qt.ItemDataRole.UserRole) + 2    # folder path stored on variant rows
+
+
+def session_file() -> Path:
+    """Per-user session file. Windows: %APPDATA%, macOS: ~/Library/Application Support,
+    Linux: ~/.local/share (the Qt AppDataLocation for the app name)."""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    root = Path(base) if base else Path.home() / ".data-kitsu-tools"
+    return root / "session.json"
 
 
 # ----------------------------------------------------------------------------
@@ -650,7 +659,13 @@ class MainWindow(QMainWindow):
         self._update_previews()
         self._update_controls()
         self.refresh_tree()
-        self.log(f"{APP_NAME} {APP_VERSION} ready. Drop a CSV file to start.")
+        if self.restore_session():
+            self.log(f"Previous session restored: {len(self.shots)} shot(s)")
+        else:
+            self.log(f"{APP_NAME} {APP_VERSION} ready. Drop a CSV file to start.")
+        self._autosave = QTimer(self)
+        self._autosave.timeout.connect(self.save_session)
+        self._autosave.start(20000)         # save every 20 seconds
 
     # ---------- layout ----------
     def _build_ui(self):
@@ -1311,11 +1326,92 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
         self._update_controls()
 
+    # ---------- session save / restore ----------
+    def _collect_session(self) -> dict:
+        return {
+            "format": 1,
+            "app_version": APP_VERSION,
+            "copy_from": self.copy_edit.text(),
+            "paste_to": self.paste_edit.text(),
+            "current_mode": self.current_mode,
+            "local_types": [k for k, cb in self.local_checks.items() if cb.isChecked()],
+            "publish_types": [k for k, cb in self.publish_checks.items() if cb.isChecked()],
+            "dailies": self.chk_dailies.isChecked(),
+            "overwrite": self.chk_overwrite.isChecked(),
+            "skip_system": self.chk_skip_sys.isChecked(),
+            "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            "shots": [
+                {"name": s.name, "frames": s.frames, "state": s.state,
+                 "done": s.done, "force_overwrite": s.force_overwrite}
+                for s in self.shots
+            ],
+            "log": self.log_view.toPlainText(),
+        }
+
+    def save_session(self):
+        try:
+            path = session_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(self._collect_session(), ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, path)           # atomic: a crash never leaves a half-written file
+        except (OSError, ValueError) as exc:
+            self.log(f"Could not save session: {exc}")
+
+    def restore_session(self) -> bool:
+        path = session_file()
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self.log(f"Could not read the saved session, starting fresh: {exc}")
+            return False
+
+        self.copy_edit.setText(data.get("copy_from", ""))
+        self.paste_edit.setText(data.get("paste_to", ""))
+        for key, cb in self.local_checks.items():
+            cb.setChecked(key in data.get("local_types", []))
+        for key, cb in self.publish_checks.items():
+            cb.setChecked(key in data.get("publish_types", []))
+        self.chk_dailies.setChecked(bool(data.get("dailies", False)))
+        self.chk_skip_sys.setChecked(bool(data.get("skip_system", True)))
+        if data.get("overwrite"):
+            self.chk_overwrite.setChecked(True)
+        else:
+            self.chk_skip.setChecked(True)
+        self.current_mode = data.get("current_mode", MODE_LOCAL)
+        geometry = data.get("geometry")
+        if geometry:
+            self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+
+        shots = []
+        for item in data.get("shots", []):
+            shot = Shot(name=str(item["name"]), frames=int(item.get("frames", 0)))
+            state = item.get("state", "new")
+            if state == "copying":          # app was closed mid-copy: resume with overwrite
+                state = "partial"
+            if state in ("done", "partial", "error"):
+                shot.state = state
+                shot.done = int(item.get("done", 0))
+            shot.force_overwrite = bool(item.get("force_overwrite", False)) or state == "partial"
+            shots.append(shot)
+        self.shots = shots
+
+        log_text = data.get("log", "")
+        if log_text:
+            self.log_view.setPlainText(log_text)
+        self.refresh_tree()
+        self._update_previews()
+        return True
+
     def closeEvent(self, event):
         if self._running and self.worker is not None:
             self.worker.stop_event.set()
             self.worker.pause_event.clear()
             self.worker.wait(10000)
+        self.save_session()
         event.accept()
 
     # ---------- path previews ----------
