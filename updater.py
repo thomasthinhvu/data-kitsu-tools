@@ -37,8 +37,21 @@ def read_local_version() -> str:
 
 
 def parse_version(text: str) -> tuple:
-    """'1.10' -> (1, 10), so 1.10 correctly counts as newer than 1.9."""
-    return tuple(int(n) for n in re.findall(r"\d+", text))
+    """Sort key for versions. Examples of the release order:
+    1.0 < 1.01 < 1.02 < 1.1 < 1.1.1 < 1.1.2 < 1.2
+
+    A segment with a leading zero after the first dot is a same-day build of
+    the previous number: "01" -> 0.1, so 1.01 sorts before 1.1.
+    """
+    parts = []
+    for i, seg in enumerate(text.strip().split(".")):
+        if not seg.isdigit():
+            continue
+        if i > 0 and len(seg) > 1 and seg.startswith("0"):
+            parts.extend([0, int(seg)])
+        else:
+            parts.append(int(seg))
+    return tuple(parts)
 
 
 def fetch_latest_version():

@@ -95,6 +95,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.01:** quy tắc đánh số (cùng ngày = 1.0N, sang ngày mới = 1.1, sau đó 1.1.N). Updater so sánh phiên bản theo thứ tự này.
   - **Version 1.0:** phiên bản đặt tên đầu tiên. Hiện trên tiêu đề cửa sổ và trong file `VERSION`.
   - **Updater:** `updater.py` kiểm tra GitHub mỗi lần mở và hiện thông báo cập nhật. Trả lời `y` để cập nhật bản mới nhất từ GitHub (git pull, hoặc tải zip nếu thư mục không phải git clone). Dùng `--no-update` để bỏ qua kiểm tra.
   - **English README:** thêm `README.en.md` và link chuyển ngôn ngữ ở cả hai README.

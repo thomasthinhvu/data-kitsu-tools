@@ -87,6 +87,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.01:** versioning rule (same-day edits = 1.0N, next day = 1.1, then 1.1.N). Updater now compares versions in this order.
   - **Version 1.0:** first named version. Shown in the window title and in the `VERSION` file.
   - **Updater:** `updater.py` checks GitHub on each launch and shows an update notice. Answer `y` to update to the latest version from GitHub (git pull, or a zip download if the folder is not a git clone). Use `--no-update` to skip the check.
   - **English README:** added `README.en.md` and language links in both READMEs.
