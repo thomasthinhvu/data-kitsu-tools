@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.09"
+APP_VERSION = "1.10"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -113,6 +113,7 @@ class Shot:
     state: str = "new"              # new | scanned | copying | done | partial | error
     done: int = 0
     force_overwrite: bool = False   # set after STOP so the next run overwrites
+    force_copy: bool = False        # user chose "Force copy": copy despite a frame mismatch, overwrite
 
 
 # ----------------------------------------------------------------------------
@@ -1079,6 +1080,18 @@ class MainWindow(QMainWindow):
         menu.setToolTipsVisible(True)
         act_open = menu.addAction("Open in Explorer")
         act_copy = menu.addAction("Copy path")
+        if item.parent() is None:
+            index = item.data(1, ROLE_INDEX)
+            if index is not None and index < len(self.shots):
+                shot = self.shots[index]
+                act_force = menu.addAction("Force copy")
+                act_force.setCheckable(True)
+                act_force.setChecked(shot.force_copy)
+                act_force.setEnabled(shot.scan is not None and shot.scan.found > 0
+                                     and shot.state != "done" and not self._busy())
+                act_force.setToolTip("Copy even if the frame count differs; existing files are overwritten")
+                act_force.triggered.connect(
+                    lambda checked=False, i=index: self.set_force_copy(i, checked))
         menu.addSeparator()
         act_remove = menu.addAction("Remove")
         act_remove.setEnabled(not self._busy())
@@ -1091,6 +1104,13 @@ class MainWindow(QMainWindow):
         act_copy.triggered.connect(lambda _=False: self.copy_path(path))
         act_remove.triggered.connect(lambda _=False: self.remove_selected())
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def set_force_copy(self, index: int, checked: bool):
+        shot = self.shots[index]
+        shot.force_copy = checked
+        self._refresh_row(index)
+        state = "on (frame mismatch allowed, files overwritten)" if checked else "off"
+        self.log(f"Force copy {state}: {shot.name}")
 
     def copy_path(self, path: Path):
         QApplication.clipboard().setText(str(path))
@@ -1218,12 +1238,13 @@ class MainWindow(QMainWindow):
         for i, shot in enumerate(self.shots):
             # Shots with a count mismatch, no files, or already done are skipped
             if (shot.scan is None or shot.state == "done" or shot.scan.found == 0
-                    or shot.scan.found != shot.frames):
+                    or (shot.scan.found != shot.frames and not shot.force_copy)):
                 continue
             jobs = build_jobs(shot, mode, copy_from, paste_to, dailies)
             if not jobs:
                 continue
-            plans.append((i, shot.frames, jobs, overwrite_all or shot.force_overwrite))
+            plans.append((i, shot.frames, jobs,
+                          overwrite_all or shot.force_overwrite or shot.force_copy))
             total += len(jobs)
         if not plans:
             QMessageBox.information(self, APP_NAME,
@@ -1342,7 +1363,8 @@ class MainWindow(QMainWindow):
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
             "shots": [
                 {"name": s.name, "frames": s.frames, "state": s.state,
-                 "done": s.done, "force_overwrite": s.force_overwrite}
+                 "done": s.done, "force_overwrite": s.force_overwrite,
+                 "force_copy": s.force_copy}
                 for s in self.shots
             ],
             "log": self.log_view.toPlainText(),
@@ -1396,6 +1418,7 @@ class MainWindow(QMainWindow):
                 shot.state = state
                 shot.done = int(item.get("done", 0))
             shot.force_overwrite = bool(item.get("force_overwrite", False)) or state == "partial"
+            shot.force_copy = bool(item.get("force_copy", False))
             shots.append(shot)
         self.shots = shots
 
