@@ -1,5 +1,7 @@
 # Data Kitsu Tools
 
+> Ý tưởng gốc: lấy file CSV shot từ Kitsu, lấy các shot rồi đồng bộ data từ network về local, và chiều ngược lại để publish.
+
 Công cụ copy data shot cho pipeline Kitsu: đọc danh sách shot từ file CSV xuất từ Kitsu,
 tự tìm các folder shot (kể cả trong sub folder), kiểm tra số frame, rồi copy sang ổ đích
 với đúng cấu trúc folder của nguồn. Không cần cài đặt phức tạp, chạy được trên **Windows, macOS và Linux**.
