@@ -42,6 +42,17 @@ với đúng cấu trúc folder của nguồn. Không cần cài đặt phức t
 
 ## Cài đặt
 
+Cách nhanh nhất là chạy file launcher, nó tự kiểm tra Python, cài PySide6 nếu thiếu rồi mở app:
+
+| Hệ điều hành | Cách chạy |
+|---|---|
+| Windows | Double-click `run.cmd` (hoặc `run.cmd --check` để chỉ kiểm tra) |
+| macOS | Double-click `run.command` (lần đầu: chuột phải > Open, và `chmod +x run.command` nếu cần) |
+| Linux | `./run.sh` (hoặc `./run.sh --check`) |
+
+Cài thủ công nếu muốn:
+
+
 Yêu cầu: **Python 3.9 trở lên** và **PySide6**.
 
 ```bash
@@ -82,5 +93,6 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Launchers:** thêm `run.cmd` (Windows), `run.sh` và `run.command` (Linux / macOS) để kiểm tra Python, cài PySide6 và mở GUI.
   - **Initial release:** GUI theo mockup, đọc CSV Kitsu, scan LOCAL / PUBLISH, copy có skip / overwrite,
     pause / resume / stop, bỏ qua file hệ thống, màu trạng thái, README.
