@@ -1,5 +1,7 @@
 # Data Kitsu Tools
 
+[English](README.en.md) | **Tiếng Việt**
+
 > Ý tưởng gốc: lấy file CSV shot từ Kitsu, lấy các shot rồi đồng bộ data từ network về local, và chiều ngược lại để publish.
 
 Công cụ copy data shot cho pipeline Kitsu: đọc danh sách shot từ file CSV xuất từ Kitsu,
@@ -93,6 +95,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **English README:** thêm `README.en.md` và link chuyển ngôn ngữ ở cả hai README.
   - **Launchers:** thêm `run.cmd` (Windows), `run.sh` và `run.command` (Linux / macOS) để kiểm tra Python, cài PySide6 và mở GUI.
   - **Initial release:** GUI theo mockup, đọc CSV Kitsu, scan LOCAL / PUBLISH, copy có skip / overwrite,
     pause / resume / stop, bỏ qua file hệ thống, màu trạng thái, README.
