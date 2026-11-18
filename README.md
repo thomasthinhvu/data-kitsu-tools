@@ -1,61 +1,54 @@
 # Data Kitsu Tools
 
-[English](README.en.md) | **Tiếng Việt**
+**English** | [Tiếng Việt](README.vi.md)
 
-> Ý tưởng gốc: lấy file CSV shot từ Kitsu, lấy các shot rồi đồng bộ data từ network về local, và chiều ngược lại để publish.
+> Original idea: take the shot CSV from Kitsu, pick the shots, and sync their data from the network to local, and the reverse way for publish.
 
-Công cụ copy data shot cho pipeline Kitsu: đọc danh sách shot từ file CSV xuất từ Kitsu,
-tự tìm các folder shot (kể cả trong sub folder), kiểm tra số frame, rồi copy sang ổ đích
-với đúng cấu trúc folder của nguồn. Không cần cài đặt phức tạp, chạy được trên **Windows, macOS và Linux**.
+A tool that copies shot data for a Kitsu pipeline. It reads the shot list from a CSV exported from Kitsu, finds the shot folders (including sub folders), checks the frame counts, and copies them to the destination while keeping the source folder structure. Setup is simple, and it runs on **Windows, macOS and Linux**.
 
 ![Data Kitsu Tools](assets/screenshot.png)
 
-## Tính năng
+## Features
 
-- **Đọc CSV Kitsu**: kéo thả hoặc bấm vào khung *DROP CSV FILE* để nạp danh sách shot (cột `Name` và `Frames`).
-  Hỗ trợ dấu `;` hoặc `,`, mã hóa UTF-8, cp1258 (tiếng Việt) và UTF-16.
-- **Shots List**: hiển thị NO, NAME, VERSION, FRAMES, STATUS. Có thể kéo thả thêm folder shot hoặc file CSV mới vào danh sách trong lúc đang copy.
-- **Scan kiểm tra trước khi copy**:
-  - Tìm folder theo tên shot ở mọi cấp sub folder của COPY FROM.
-  - Số frame thực tế so với cột Frames. Lệch frame thì dòng chuyển đỏ và shot bị bỏ qua.
-  - Không thấy file thì dòng màu vàng.
-  - Rê chuột vào STATUS để xem frame nào bị thiếu.
-- **LOCAL**: copy các folder shot và biến thể `PL01`, `PL02`, `PL03`... giữ nguyên cấu trúc thư mục nguồn.
-  Các biến thể hiện dạng cây thu gọn / mở rộng như Explorer.
-- **PUBLISH**: tự chọn version cao nhất (`_v01` … `_v06` → lấy `v06`) và copy vào
-  `PASTE TO/<YYMMDD>/<tên folder>`. Có tùy chọn *MAKE DAILIES FOLDER*.
-- **Lọc theo loại file**: EXR, DPX, MOV, TIF/TIFF, PNG, JPG (tùy mode).
-- **COPY MODE**: *SKIP* (bỏ qua file đã có) hoặc *OVERWRITE* (ghi đè). Tùy chọn bỏ qua file hệ thống
-  (`.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`).
-- **START / PAUSE / STOP**: tạm dừng và tiếp tục được. Khi STOP, file đang copy dở sẽ bị xóa
-  và shot đó được copy lại bằng chế độ ghi đè ở lần START sau.
-- **Chống lỗi copy dở**: file được ghi vào `<tên>.part` và chỉ đổi tên khi đã copy xong.
-- **Tiến độ**: thanh tiến độ tổng và trạng thái từng shot đổi màu theo tiến trình.
+- **Read Kitsu CSV**: drag and drop, or click the *DROP CSV FILE* box, to load the shot list (the `Name` and `Frames` columns).
+  Supports `;` or `,` separators, UTF-8, cp1258 (Vietnamese) and UTF-16.
+- **Shots List**: shows NO, NAME, VERSION, FRAMES, STATUS. You can drag more shot folders or CSV files into the list while a copy is running.
+- **Scan before copying**:
+  - Finds the shot folders by name at any depth under COPY FROM.
+  - Compares the real frame count with the Frames column. If they differ, the row turns red and the shot is skipped.
+  - No files found: the row is yellow.
+  - Hover over STATUS to see which frames are missing.
+- **LOCAL**: copies shot folders and their variants (`PL01`, `PL02`, `PL03`...) and keeps the source folder structure. Variants appear as a tree you can collapse or expand, like in Explorer.
+- **PUBLISH**: picks the highest version (`_v01` … `_v06` → `v06`) and copies it to `PASTE TO/<YYMMDD>/<folder name>`. Optional *MAKE DAILIES FOLDER* option.
+- **File types filter**: EXR, DPX, MOV, TIF/TIFF, PNG, JPG (depends on the mode).
+- **COPY MODE**: *SKIP* (keep existing files) or *OVERWRITE*. Optional skip of system files (`.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`).
+- **START / PAUSE / STOP**: pause and resume are supported. On STOP, the file being copied is deleted and that shot is copied again with overwrite on the next START.
+- **No half-written files**: data is written to `<name>.part` and renamed only when the copy is complete.
+- **Progress**: an overall progress bar, and each shot's status changes colour as it goes.
 
-### Màu trạng thái
+### Status colours
 
-| Màu | Ý nghĩa |
+| Colour | Meaning |
 |---|---|
-| Đỏ đậm | Số frame không khớp với cột Frames (shot bị bỏ qua) |
-| Vàng | Không tìm thấy file sau khi scan |
-| Xanh dương đậm | Đang copy |
-| Xám, nghiêng, gạch ngang | Đã copy xong |
-| Cam | Đã dừng giữa chừng (sẽ ghi đè khi chạy lại) |
+| Bold red | Frame count does not match the Frames column (shot is skipped) |
+| Yellow | No files found after scan |
+| Bold blue | Copying |
+| Grey, italic, struck through | Copy finished |
+| Orange | Stopped halfway (will overwrite on the next run) |
 
-## Cài đặt
+## Installation
 
-Cách nhanh nhất là chạy file launcher, nó tự kiểm tra Python, cài PySide6 nếu thiếu rồi mở app:
+Requirements: **Python 3.9 or newer** and **PySide6**.
 
-| Hệ điều hành | Cách chạy |
+The easiest way is to run the launcher. It checks Python, installs PySide6 if it is missing, and opens the app:
+
+| OS | How to run |
 |---|---|
-| Windows | Double-click `run.cmd` (hoặc `run.cmd --check` để chỉ kiểm tra) |
-| macOS | Double-click `run.command` (lần đầu: chuột phải > Open, và `chmod +x run.command` nếu cần) |
-| Linux | `./run.sh` (hoặc `./run.sh --check`) |
+| Windows | Double-click `run.cmd` (or `run.cmd --check` to only run the checks) |
+| macOS | Double-click `run.command` (first time: right-click > Open, and `chmod +x run.command` if needed) |
+| Linux | `./run.sh` (or `./run.sh --check`) |
 
-Cài thủ công nếu muốn:
-
-
-Yêu cầu: **Python 3.9 trở lên** và **PySide6**.
+Manual install if you prefer:
 
 ```bash
 # Windows (PowerShell)
@@ -67,35 +60,33 @@ python3 -m pip install -r requirements.txt
 python3 data_kitsu_tools.py
 ```
 
-## Sử dụng nhanh
+## Quick start
 
-1. Nạp CSV bằng khung *DROP CSV FILE*.
-2. Nhập *COPY FROM* (nguồn) và *PASTE TO* (đích). Có thể kéo thả folder từ Explorer / Finder.
-3. Bấm **LOCAL** hoặc **PUBLISH** để scan. Kiểm tra màu và cột STATUS.
-4. Bấm **START**, xác nhận, rồi theo dõi tiến độ trong danh sách và log.
+1. Load the CSV with the *DROP CSV FILE* box.
+2. Enter *COPY FROM* (source) and *PASTE TO* (destination). You can drag folders in from Explorer / Finder.
+3. Click **LOCAL** or **PUBLISH** to scan. Check the colours and the STATUS column.
+4. Click **START**, confirm, then follow the progress in the list and the log.
 
-## Tính năng kỹ thuật
+## Technical details
 
-- Ngôn ngữ: **Python 3** với giao diện **Qt (PySide6)**.
-- Copy bằng khối 8 MB, copy song song 4 file mỗi shot, và thread riêng nên giao diện không bị đơ.
-- Cache: không dùng RAM cache riêng vì ổ đĩa / mạng mới là nút thắt. Hệ điều hành đã có page cache,
-  app dùng buffer lớn và copy song song để tận dụng nó.
-- Đường dẫn dùng `pathlib` nên chạy đúng với `W:\...` trên Windows và `/Volumes/...`, `/mnt/...` trên macOS / Linux.
+- Language: **Python 3** with a **Qt (PySide6)** GUI.
+- Copies in 8 MB chunks, 4 files in parallel per shot, on a worker thread so the GUI does not freeze.
+- Cache: no custom RAM cache, because the disk or network is the bottleneck. The OS already has a page cache; the app uses large buffers and parallel copies to make use of it.
+- Paths use `pathlib`, so it works with `W:\...` on Windows and with `/Volumes/...` or `/mnt/...` on macOS and Linux.
 
-### Tương thích
+### Compatibility
 
-| Hệ điều hành | Trạng thái |
+| OS | Status |
 |---|---|
-| Windows 10 / 11 | Hỗ trợ (ổ mạng, ổ W:, E: đều được) |
-| macOS 12+ | Hỗ trợ, bỏ qua file `._*` và `.DS_Store` |
-| Linux | Đã kiểm thử logic và giao diện |
+| Windows 10 / 11 | Supported (network drives and drive letters such as W: and E:) |
+| macOS 12+ | Supported; ignores `._*` and `.DS_Store` files |
+| Linux | Logic and GUI tested |
 
 ## Changelog
 
 ## My Modification update
 
 - [26-11-18]
-  - **English README:** thêm `README.en.md` và link chuyển ngôn ngữ ở cả hai README.
-  - **Launchers:** thêm `run.cmd` (Windows), `run.sh` và `run.command` (Linux / macOS) để kiểm tra Python, cài PySide6 và mở GUI.
-  - **Initial release:** GUI theo mockup, đọc CSV Kitsu, scan LOCAL / PUBLISH, copy có skip / overwrite,
-    pause / resume / stop, bỏ qua file hệ thống, màu trạng thái, README.
+  - **English README:** added `README.en.md` and language links in both READMEs.
+  - **Launchers:** added `run.cmd` (Windows), `run.sh` and `run.command` (Linux / macOS) to check Python, install PySide6 and open the GUI.
+  - **Initial release:** GUI based on the mockup, reads Kitsu CSV, LOCAL / PUBLISH scan, copy with skip / overwrite, pause / resume / stop, skips system files, status colours, README.
