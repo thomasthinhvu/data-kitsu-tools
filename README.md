@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.03:** COPY FROM / PASTE TO previews show the full path of the first shot (found in the background before a scan).
   - **Version 1.02:** Shot list buttons CLEAR / ADD / REMOVE, right-click menu (Open in Explorer, Copy path, Remove), and aligned mode and action buttons.
   - **Version 1.01:** versioning rule (same-day edits = 1.0N, next day = 1.1, then 1.1.N). Updater now compares versions in this order.
   - **Version 1.0:** first named version. Shown in the window title and in the `VERSION` file.

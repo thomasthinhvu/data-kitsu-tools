@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.03:** Ô xem trước COPY FROM / PASTE TO hiện full path của shot đầu tiên (tìm trong nền trước khi scan).
   - **Version 1.02:** Nút CLEAR / ADD / REMOVE trong danh sách shot, menu chuột phải (Open in Explorer, Copy path, Remove), và căn chỉnh lại các nút chế độ và nút điều khiển.
   - **Version 1.01:** quy tắc đánh số (cùng ngày = 1.0N, sang ngày mới = 1.1, sau đó 1.1.N). Updater so sánh phiên bản theo thứ tự này.
   - **Version 1.0:** phiên bản đặt tên đầu tiên. Hiện trên tiêu đề cửa sổ và trong file `VERSION`.

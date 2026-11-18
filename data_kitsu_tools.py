@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame,
@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.02"
+APP_VERSION = "1.03"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -168,6 +168,16 @@ def scan_source(copy_from: Path, names) -> dict:
                 if candidate in wanted:
                     matches[candidate].append(Path(dirpath) / d)
     return matches
+
+
+def find_first_folder(root: Path, name: str):
+    """Return the first folder under root matching a shot name (fast, used for previews)."""
+    for dirpath, dirnames, _ in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not is_system_name(d)]
+        for d in dirnames:
+            if d == name or d.startswith(name + "_"):
+                return Path(dirpath) / d
+    return None
 
 
 def latest_version(paths):
@@ -411,6 +421,23 @@ def apply_style(item: QTreeWidgetItem, style: dict):
 # ----------------------------------------------------------------------------
 # Worker threads
 # ----------------------------------------------------------------------------
+class PreviewWorker(QThread):
+    """Looks up the full source folder of the first shot so the preview can show it."""
+    found = Signal(str, str, str)           # copy_from, shot name, folder path ("" = none)
+
+    def __init__(self, copy_from: Path, name: str):
+        super().__init__()
+        self.copy_from = copy_from
+        self.name = name
+
+    def run(self):
+        try:
+            path = find_first_folder(self.copy_from, self.name)
+        except OSError:
+            path = None
+        self.found.emit(str(self.copy_from), self.name, str(path) if path else "")
+
+
 class ScanWorker(QThread):
     """Scans the source tree in the background so the GUI stays responsive."""
     finished_scan = Signal(object, str)     # (results list, error message)
@@ -598,6 +625,11 @@ class MainWindow(QMainWindow):
         self.scan_worker = None
         self.worker = None
         self._expanded: set = set()
+        self._preview_cache: dict = {}      # (copy_from, shot name) -> Path or None
+        self._preview_worker = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._run_preview_search)
         self._scanning = False
         self._running = False
         self._build_ui()
@@ -1241,44 +1273,77 @@ class MainWindow(QMainWindow):
             label.setText(text)
             label.setStyleSheet("font-size: 11px;")
 
+    def _schedule_preview_search(self):
+        self._preview_timer.start(400)      # debounce while the user is typing
+
+    def _run_preview_search(self):
+        copy_from = self._copy_from()
+        if self._busy() or copy_from is None or not copy_from.is_dir() or not self.shots:
+            return
+        key = (str(copy_from), self.shots[0].name)
+        if key in self._preview_cache:
+            return
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            return                          # the finished worker will trigger the next search
+        self._preview_worker = PreviewWorker(copy_from, self.shots[0].name)
+        self._preview_worker.found.connect(self._on_preview_found)
+        self._preview_worker.start()
+
+    def _on_preview_found(self, copy_from_text: str, name: str, path_text: str):
+        self._preview_cache[(copy_from_text, name)] = Path(path_text) if path_text else None
+        self._update_previews()
+
     def _update_previews(self, *_):
         copy_from = self._copy_from()
         paste_to = self._paste_to()
         mode = self.current_mode
-        sample = next((s for s in self.shots if s.scan and s.scan.units), None)
-        name = self.shots[0].name if self.shots else "<SHOT>"
         dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
+        sample = next((s for s in self.shots if s.scan and s.scan.units), None)
+        name = self.shots[0].name if self.shots else ""
 
-        # Source preview
+        # Full path of the sample shot folder in the source
+        found = None
+        src_warn = ""
         if sample:
-            src = str(sample.scan.units[0].path)
-        elif copy_from:
-            src = os.path.join(str(copy_from), "...", name)
-        else:
+            found = sample.scan.units[0].path
+        elif copy_from and name and copy_from.is_dir():
+            key = (str(copy_from), name)
+            if key in self._preview_cache:
+                found = self._preview_cache[key]
+                if found is None:
+                    src_warn = f"Folder for {name} not found in COPY FROM"
+            else:
+                self._schedule_preview_search()
+
+        if copy_from is None:
             src = ""
-        src_warn = "Source folder not found" if copy_from and not copy_from.is_dir() else ""
+        elif found is not None:
+            src = str(found)
+        else:
+            src = str(copy_from)
+        if copy_from and not copy_from.is_dir():
+            src_warn = "Source folder not found"
         self._set_preview(self.copy_preview, src, src_warn)
 
-        # Destination preview
+        # Full destination path of the same shot
         dst, dst_warn = "", ""
         if paste_to is None:
             dst = ""
-        elif mode == MODE_PUBLISH:
-            tail = sample.scan.units[0].path.name if sample else f"<{name}>"
-            dst = os.path.join(str(paste_to), dailies, tail) if dailies else os.path.join(str(paste_to), tail)
-        elif sample and copy_from:
+        elif found is not None and mode == MODE_PUBLISH:
+            dst = os.path.join(str(paste_to), dailies, found.name) if dailies \
+                else os.path.join(str(paste_to), found.name)
+        elif found is not None and copy_from:
             try:
-                rel = sample.scan.units[0].path.relative_to(copy_from)
-                dst = os.path.join(str(paste_to), str(rel))
+                dst = os.path.join(str(paste_to), str(found.relative_to(copy_from)))
             except ValueError:
-                dst = os.path.join(str(paste_to), "...", name)
+                dst = os.path.join(str(paste_to), found.name)
         else:
-            dst = os.path.join(str(paste_to), "...", name)
+            tail = name or "<SHOT>"
+            dst = os.path.join(str(paste_to), dailies, tail) if dailies \
+                else os.path.join(str(paste_to), tail)
         if copy_from and paste_to and self._is_inside(paste_to, copy_from):
             dst_warn = "Destination is inside the source folder"
         self._set_preview(self.paste_preview, dst, dst_warn)
-
-
 
 def apply_dark_theme(app: QApplication):
     app.setStyle("Fusion")
