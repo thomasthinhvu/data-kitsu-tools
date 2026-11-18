@@ -31,6 +31,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QPointF, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen,
+                          QTextCharFormat,
                           QPixmap, QPolygonF, QTextCursor)
 from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import (
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
 AUTHOR = "Thomas Thinh Vu"
@@ -1162,8 +1163,18 @@ class MainWindow(QMainWindow):
             self.chk_overwrite.setChecked(True)
 
     # ---------- helpers ----------
-    def log(self, msg: str):
-        self.log_view.appendPlainText(f"{time.strftime('%H:%M:%S')}  {msg}")
+    def log(self, msg: str, color: str | None = None):
+        """Append one log line. An optional colour marks the line (yellow / red shots)."""
+        document = self.log_view.document()
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not document.isEmpty():
+            cursor.insertBlock()
+        fmt = QTextCharFormat()
+        if color:
+            fmt.setForeground(QColor(color))
+        cursor.setCharFormat(fmt)
+        cursor.insertText(f"{time.strftime('%H:%M:%S')}  {msg}")
 
     def _busy(self) -> bool:
         return self._scanning or self._running
@@ -1567,9 +1578,9 @@ class MainWindow(QMainWindow):
                     continue
                 colour, reason, path = problem
                 tag = "YELLOW" if colour == C_YELLOW else "RED"
-                self.log(f"  [{tag}] {s.name}: {reason}")
+                self.log(f"  [{tag}] {s.name}: {reason}", colour)
                 for line in path.splitlines():
-                    self.log(f"      path: {line}")
+                    self.log(f"      path: {line}", colour)
         self.refresh_tree()
         self._update_previews()
         self._update_controls()
@@ -1673,6 +1684,7 @@ class MainWindow(QMainWindow):
         cursor = QTextCursor(block)
         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.setCharFormat(QTextCharFormat())     # progress text is never coloured
         cursor.insertText(f"{self._progress_stamp}  {text}")
 
     def _on_shot_started(self, index: int, total: int):

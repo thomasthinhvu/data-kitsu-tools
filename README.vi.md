@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.15:** các dòng log của shot vàng và đỏ (lý do và đường dẫn) được tô màu vàng hoặc đỏ để dễ theo dõi.
   - **Version 1.14:** nút About đổi tên thành **INFO**, đặt bên phải CLEAR. Cửa sổ About hiện chức danh (VFX Compositor), địa chỉ ví BSC kèm nút **Copy** (đổi thành *Copied*). COPY FROM và PASTE TO có nút ▾ liệt kê 10 đường dẫn gần nhất, dùng chung cho cả hai ô và được lưu cùng phiên làm việc.
   - **Version 1.13:** tiêu đề cửa sổ hiện tên tác giả (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). Nút **ABOUT ME** (góc dưới bên phải) mở cửa sổ có link liên hệ (ArtStation, LinkedIn, Facebook, Gmail) và mã QR donation đủ lớn để quét.
   - **Version 1.12:** hai ô thông số bên cạnh ADD / REMOVE / CLEAR hiển thị **active time** (% thời gian đĩa đang làm việc) và **tốc độ copy** (MB/s), có biểu đồ 60 giây. Shot đã có đủ file ở đích sẽ có màu vàng, cột version hiển thị phiên bản đang có ở đích kèm `-copied` (ví dụ `v02-copied`) và bị bỏ qua trừ khi bật OVERWRITE hoặc Force copy. Shot vàng và đỏ giờ ghi lý do và đường dẫn vào log, tooltip cũng hiện cùng lý do.
