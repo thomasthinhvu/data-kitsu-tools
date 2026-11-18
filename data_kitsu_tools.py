@@ -42,7 +42,9 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
+PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
+WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
 AUTHOR = "Thomas Thinh Vu"
 DONATE_QR = Path(__file__).resolve().parent / "assets" / "donate_qr.png"
 # (kind for the icon, text shown, link opened)
@@ -667,6 +669,7 @@ def local_paths(mime) -> list:
 
 class PathEdit(QLineEdit):
     """Line edit that accepts a folder dragged from Explorer / Finder / file manager."""
+    committed = Signal(str)                 # a dropped folder was put into the field
 
     def __init__(self, placeholder: str = ""):
         super().__init__()
@@ -686,6 +689,7 @@ class PathEdit(QLineEdit):
         if paths:
             p = paths[0]
             self.setText(str(p if p.is_dir() else p.parent))
+            self.committed.emit(self.text())
             event.acceptProposedAction()
 
 
@@ -840,6 +844,10 @@ class AboutDialog(QDialog):
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name.setStyleSheet("font-size: 20px; font-weight: bold;")
         layout.addWidget(name)
+        role = QLabel("VFX Compositor")
+        role.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        role.setStyleSheet("font-size: 13px;")
+        layout.addWidget(role)
 
         for kind, text, url in CONTACTS:
             row = QHBoxLayout()
@@ -869,6 +877,26 @@ class AboutDialog(QDialog):
             qr.setPixmap(pix.scaled(QSize(420, 420), Qt.AspectRatioMode.KeepAspectRatio,
                                     Qt.TransformationMode.SmoothTransformation))
         layout.addWidget(qr)
+
+        wallet_title = QLabel("Wallet code (BSC network):")
+        wallet_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wallet_title.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(wallet_title)
+        wallet_row = QHBoxLayout()
+        wallet = QLineEdit(WALLET_BSC)
+        wallet.setReadOnly(True)
+        wallet.setCursorPosition(0)
+        copy_button = QPushButton("Copy")
+        copy_button.setFixedWidth(90)
+
+        def copy_wallet():
+            QApplication.clipboard().setText(WALLET_BSC)
+            copy_button.setText("Copied")
+
+        copy_button.clicked.connect(copy_wallet)
+        wallet_row.addWidget(wallet, 1)
+        wallet_row.addWidget(copy_button)
+        layout.addLayout(wallet_row)
 
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
@@ -938,6 +966,15 @@ class MainWindow(QMainWindow):
         path_height = self.copy_edit.sizeHint().height() * 2
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn):
             w.setFixedHeight(path_height)
+        self.path_history: list = []        # shared by COPY FROM and PASTE TO, newest first
+        self.copy_hist = self._history_button(self.copy_edit)
+        self.paste_hist = self._history_button(self.paste_edit)
+        for w in (self.copy_hist, self.paste_hist):
+            w.setFixedHeight(path_height)
+        self.copy_edit.editingFinished.connect(lambda e=self.copy_edit: self.remember_path(e.text()))
+        self.paste_edit.editingFinished.connect(lambda e=self.paste_edit: self.remember_path(e.text()))
+        self.copy_edit.committed.connect(self.remember_path)
+        self.paste_edit.committed.connect(self.remember_path)
         self.copy_preview = QLabel()
         self.paste_preview = QLabel()
         for lab in (self.copy_preview, self.paste_preview):
@@ -946,10 +983,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("COPY FROM"), 0, 0)
         grid.addWidget(self.copy_edit, 0, 1)
         grid.addWidget(self.copy_btn, 0, 2)
+        grid.addWidget(self.copy_hist, 0, 3)
         grid.addWidget(self.copy_preview, 1, 1, 1, 2)
         grid.addWidget(QLabel("PASTE TO"), 2, 0)
         grid.addWidget(self.paste_edit, 2, 1)
         grid.addWidget(self.paste_btn, 2, 2)
+        grid.addWidget(self.paste_hist, 2, 3)
         grid.addWidget(self.paste_preview, 3, 1, 1, 2)
         left.addWidget(paths_box)
         self.copy_edit.textChanged.connect(self._update_previews)
@@ -1050,6 +1089,8 @@ class MainWindow(QMainWindow):
         tree_buttons = QHBoxLayout()
         self.btn_clear = QPushButton("CLEAR")
         self.btn_clear.clicked.connect(self.clear_shots)
+        self.btn_info = QPushButton("INFO")
+        self.btn_info.clicked.connect(self.show_about)
         self.btn_add = QPushButton("ADD")
         add_menu = QMenu(self.btn_add)
         add_menu.addAction("Add shot folder...", self.add_folder_shot)
@@ -1057,7 +1098,7 @@ class MainWindow(QMainWindow):
         self.btn_add.setMenu(add_menu)
         self.btn_remove = QPushButton("REMOVE")
         self.btn_remove.clicked.connect(self.remove_selected)
-        for b in (self.btn_add, self.btn_remove, self.btn_clear):
+        for b in (self.btn_add, self.btn_remove, self.btn_clear, self.btn_info):
             b.setMinimumHeight(34)
             tree_buttons.addWidget(b)
         self.stat_active = StatCell("ACTIVE TIME", fixed_max=100.0)
@@ -1083,9 +1124,6 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumHeight(140)
         outer.addWidget(self.progress)
         outer.addWidget(self.log_view)
-        about = QPushButton("ABOUT ME")
-        about.clicked.connect(self.show_about)
-        self.statusBar().addPermanentWidget(about)
 
     @staticmethod
     def _mode_button(text: str) -> QPushButton:
@@ -1171,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.btn_remove.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
+                  self.copy_hist, self.paste_hist,
                   self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
                   *self.local_checks.values(), *self.publish_checks.values()):
             w.setEnabled(not self._running)
@@ -1188,6 +1227,42 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text().strip())
         if folder:
             edit.setText(folder)
+            self.remember_path(folder)
+
+    def _history_button(self, edit: PathEdit) -> QToolButton:
+        """Small drop-down button listing the recent paths."""
+        button = QToolButton()
+        button.setText("▾")
+        button.setToolTip(f"Recent paths (last {PATH_HISTORY_MAX}, shared by COPY FROM and PASTE TO)")
+        button.setFixedWidth(30)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(button)
+        menu.aboutToShow.connect(lambda: self._fill_history_menu(menu, edit))
+        button.setMenu(menu)
+        return button
+
+    def _fill_history_menu(self, menu: QMenu, edit: PathEdit):
+        menu.clear()
+        if not self.path_history:
+            menu.addAction("(no recent paths)").setEnabled(False)
+            return
+        for path in self.path_history:
+            menu.addAction(path, lambda p=path, e=edit: self.choose_path(e, p))
+
+    def choose_path(self, edit: PathEdit, path: str):
+        edit.setText(path)
+        self.remember_path(path)
+
+    def remember_path(self, text: str):
+        """Put a folder at the top of the shared history (duplicates move up)."""
+        text = text.strip().strip('"').strip()
+        if not text:
+            return
+        text = str(Path(text))
+        if text in self.path_history:
+            self.path_history.remove(text)
+        self.path_history.insert(0, text)
+        del self.path_history[PATH_HISTORY_MAX:]
 
     def load_csv_path(self, path: Path, replace: bool):
         if self._busy():
@@ -1522,6 +1597,9 @@ class MainWindow(QMainWindow):
             return
 
         dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
+        for used in (copy_from, paste_to):
+            if used is not None:
+                self.remember_path(str(used))
         overwrite_all = self.chk_overwrite.isChecked()
         plans, total = [], 0
         for i, shot in enumerate(self.shots):
@@ -1643,6 +1721,7 @@ class MainWindow(QMainWindow):
             "format": 1,
             "app_version": APP_VERSION,
             "copy_from": self.copy_edit.text(),
+            "path_history": self.path_history,
             "paste_to": self.paste_edit.text(),
             "current_mode": self.current_mode,
             "local_types": [k for k, cb in self.local_checks.items() if cb.isChecked()],
@@ -1681,6 +1760,7 @@ class MainWindow(QMainWindow):
             self.log(f"Could not read the saved session, starting fresh: {exc}")
             return False
 
+        self.path_history = [str(p) for p in data.get("path_history", []) if p][:PATH_HISTORY_MAX]
         self.copy_edit.setText(data.get("copy_from", ""))
         self.paste_edit.setText(data.get("paste_to", ""))
         for key, cb in self.local_checks.items():

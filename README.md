@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.14:** the About button is now **INFO**, placed right of CLEAR. The About window shows the role (VFX Compositor), the BSC wallet address with a **Copy** button (it changes to *Copied*). COPY FROM and PASTE TO have a ▾ button listing the last 10 paths, shared by both fields and saved with the session.
   - **Version 1.13:** the window title shows the author (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). New **ABOUT ME** button (bottom right) opens a window with the contact links (ArtStation, LinkedIn, Facebook, Gmail) and the donation QR code, large enough to scan.
   - **Version 1.12:** two live readouts beside ADD / REMOVE / CLEAR show the **active time** (% of time disk I/O is running) and the **transfer rate** (MB/s), with a 60-second graph. A shot whose files already exist on the destination is yellow, shows the version found there with `-copied` (e.g. `v02-copied`) and is skipped unless OVERWRITE or Force copy is on. Yellow and red shots now log the reason and the path, and their tooltip gives the same reason.
   - **Version 1.11:** a shot marked **Force copy** shows in the normal colour instead of red.
