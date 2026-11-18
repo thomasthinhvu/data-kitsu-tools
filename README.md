@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.08:** scan matches folders with or without the reel tag (`HHCC_R1_SC04_020_Tom_comp_v03` now matches shot `HHCC_SC04_020`), so PUBLISH finds these shots instead of showing them as missing. Added a test for this.
   - **Version 1.07:** the copy log uses one line for the whole run; only its numbers change (e.g. `Copying HHCC_TLR_030 (17/42 file(s))`).
   - **Version 1.06:** the copy log shows one live line per shot, e.g. `Copying HHCC_TLR_030 (0/42 file(s))` counting up to `42/42`, and ends with `- done`.
   - **Version 1.05:** removed the left DROP CSV box; the empty SHOTS LIST now shows the drop / click hint instead. COPY FROM and PASTE TO fields are twice as tall to make drag and drop easier.

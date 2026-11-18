@@ -108,7 +108,35 @@ def run_tests():
     shots = dkt.load_csv(csv_path)
     assert [(s.name, s.frames) for s in shots] == [("HHCC_SC13_010", 57), ("HHCC_SC13_0100", 31)], shots
 
+    test_reel_tag_and_publish()
     print("ALL CORE TESTS PASSED")
+
+
+def test_reel_tag_and_publish():
+    """Folders like HHCC_R1_SC04_020_Tom_comp_v03 must match the CSV name HHCC_SC04_020."""
+    tmp = Path(tempfile.mkdtemp())
+    src = tmp / "src"
+    base = src / "FILM/TEASER/FILM/R1_SC04"
+    for v in (1, 2, 3):
+        make(base / "HHCC_R1_SC04_020" / f"HHCC_R1_SC04_020_Tom_comp_v{v:02d}", 5)
+    make(base / "HHCC_SC04_010" / "HHCC_SC04_010_Tom_comp_v01", 4)
+    names = ["HHCC_SC04_020", "HHCC_SC04_010", "HHCC_SC04_0200"]
+    matched = dkt.scan_source(src, names)
+    assert len(matched["HHCC_SC04_020"]) == 4, matched["HHCC_SC04_020"]
+    assert matched["HHCC_SC04_0200"] == []          # longer shot number must not match
+    assert dkt.folder_matches("HHCC_R1_SC04_020_Tom_comp_v03", "HHCC_SC04_020")
+    assert not dkt.folder_matches("HHCC_R1_SC04_0200", "HHCC_SC04_020")
+
+    r = dkt.analyze_shot("HHCC_SC04_020", matched["HHCC_SC04_020"], dkt.MODE_PUBLISH, (".exr",), True)
+    assert r.version_text == "v03" and r.found == 5, (r.version_text, r.found)
+    assert r.units[0].path.name == "HHCC_R1_SC04_020_Tom_comp_v03"
+    shot = dkt.Shot("HHCC_SC04_020", 5, scan=r)
+    jobs = dkt.build_jobs(shot, dkt.MODE_PUBLISH, src, tmp / "dst", "261118")
+    assert all(d.parent == tmp / "dst/261118/HHCC_R1_SC04_020_Tom_comp_v03" for _, d in jobs)
+
+    r2 = dkt.analyze_shot("HHCC_SC04_010", matched["HHCC_SC04_010"], dkt.MODE_PUBLISH, (".exr",), True)
+    assert r2.version_text == "v01" and r2.found == 4
+    print("reel tag test passed")
 
 
 if __name__ == "__main__":

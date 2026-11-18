@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.07"
+APP_VERSION = "1.08"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -151,6 +151,25 @@ def tree_files(folder: Path, exts, skip_system: bool) -> list:
     return sorted(result)
 
 
+REEL_TAG_RE = re.compile(r"^([A-Za-z]+)_R\d+_")
+
+
+def normalize_folder_name(name: str) -> str:
+    """HHCC_R1_SC04_020_Tom_comp_v03 -> HHCC_SC04_020_Tom_comp_v03.
+
+    Folders sometimes carry a reel tag (R1_, R3_...) that the CSV name does not have.
+    """
+    return REEL_TAG_RE.sub(r"\1_", name, count=1)
+
+
+def folder_matches(folder_name: str, shot_name: str) -> bool:
+    """True when a folder belongs to a shot, with or without the reel tag."""
+    for variant in (folder_name, normalize_folder_name(folder_name)):
+        if variant == shot_name or variant.startswith(shot_name + "_"):
+            return True
+    return False
+
+
 def scan_source(copy_from: Path, names) -> dict:
     """Walk the source tree once and return {shot name: [matching folders]}.
 
@@ -162,11 +181,15 @@ def scan_source(copy_from: Path, names) -> dict:
     for dirpath, dirnames, _ in os.walk(copy_from):
         dirnames[:] = [d for d in dirnames if not is_system_name(d)]
         for d in dirnames:
-            parts = d.split("_")
-            for k in range(1, len(parts) + 1):
-                candidate = "_".join(parts[:k])
-                if candidate in wanted:
-                    matches[candidate].append(Path(dirpath) / d)
+            hits = set()
+            for variant in {d, normalize_folder_name(d)}:
+                parts = variant.split("_")
+                for k in range(1, len(parts) + 1):
+                    candidate = "_".join(parts[:k])
+                    if candidate in wanted:
+                        hits.add(candidate)
+            for candidate in hits:
+                matches[candidate].append(Path(dirpath) / d)
     return matches
 
 
@@ -175,7 +198,7 @@ def find_first_folder(root: Path, name: str):
     for dirpath, dirnames, _ in os.walk(root):
         dirnames[:] = [d for d in dirnames if not is_system_name(d)]
         for d in dirnames:
-            if d == name or d.startswith(name + "_"):
+            if folder_matches(d, name):
                 return Path(dirpath) / d
     return None
 
@@ -192,7 +215,7 @@ def latest_version(paths):
 
 def unit_label(folder: Path, shot_name: str) -> str:
     """Short label for the Version column: PL01, v06 or the leftover suffix."""
-    suffix = folder.name[len(shot_name):]
+    suffix = normalize_folder_name(folder.name)[len(shot_name):]
     m = VARIANT_RE.search(suffix)
     if m:
         return m.group(1).upper()
