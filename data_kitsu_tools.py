@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import datetime as dt
 import io
 import os
@@ -43,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.16"
+APP_VERSION = "1.17"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -663,6 +665,7 @@ class CopyWorker(QThread):
     shot_progress = Signal(int, int)        # shot index, files done
     shot_finished = Signal(int, str)        # shot index, done / partial / error
     overall = Signal(int, int)              # files done, files total
+    file_done = Signal(int, str, int, float, str, str)  # shot, file, bytes, seconds, result, error
     log = Signal(str)
 
     def __init__(self, plans, io: IoStats | None = None, threads: int = MAX_WORKERS):
@@ -674,6 +677,23 @@ class CopyWorker(QThread):
         self.io = io or IoStats()
         self.threads = max(1, threads)
 
+    def _timed_copy(self, src: Path, dst: Path, overwrite: bool):
+        """copy_file with timing. Returns (result, bytes, seconds, error)."""
+        start = time.monotonic()
+        error = ""
+        try:
+            result = copy_file(src, dst, overwrite, self.pause_event, self.stop_event, self.io)
+        except Exception as exc:
+            result, error = "error", str(exc)
+        seconds = time.monotonic() - start
+        nbytes = 0
+        if result == "copied":
+            try:
+                nbytes = src.stat().st_size
+            except OSError:
+                pass
+        return result, nbytes, seconds, error
+
     def run(self):
         total = sum(len(p[2]) for p in self.plans)
         done_all = 0
@@ -683,20 +703,23 @@ class CopyWorker(QThread):
             self.shot_started.emit(index, len(jobs))
             done = errors = 0
             executor = ThreadPoolExecutor(max_workers=self.threads)
-            futures = [executor.submit(copy_file, src, dst, overwrite,
-                                       self.pause_event, self.stop_event, self.io)
-                       for src, dst in jobs]
+            futures = {executor.submit(self._timed_copy, src, dst, overwrite): (src, dst)
+                       for src, dst in jobs}
             try:
                 for future in as_completed(futures):
                     if self.stop_event.is_set():
                         break
+                    src, _dst = futures[future]
                     try:
-                        result = future.result()
-                    except Exception as exc:
-                        errors += 1
-                        self.log.emit(f"  error: {exc}")
-                        continue
+                        result, nbytes, seconds, error = future.result()
+                    except Exception as exc:            # cancelled or unexpected
+                        result, nbytes, seconds, error = "error", 0, 0.0, str(exc)
                     if result == "stopped":
+                        continue
+                    self.file_done.emit(index, str(src), nbytes, seconds, result, error)
+                    if error:
+                        errors += 1
+                        self.log.emit(f"  error: {error}")
                         continue
                     done += 1
                     done_all += 1
@@ -801,6 +824,122 @@ class ShotTree(QTreeWidget):
 # ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Long-term records, kept for later performance analysis
+# ----------------------------------------------------------------------------
+MAX_RUN_FOLDERS = 100                    # older run folders are deleted
+
+
+def data_dir() -> Path:
+    """Folder that holds the session, the app log, run records and history."""
+    return session_file().parent
+
+
+def setup_app_log() -> logging.Logger:
+    """Rotating text log of everything shown in the log panel."""
+    logger = logging.getLogger("data_kitsu_tools")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers:
+        try:
+            path = data_dir() / "logs" / "app.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=5,
+                                          encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s"))
+            logger.addHandler(handler)
+        except OSError:
+            pass                            # logging to file is optional
+    return logger
+
+
+class RunRecorder:
+    """One folder per copy run: samples.csv (per second), files.csv (per file),
+    summary.json. Each finished run also adds one line to history.csv."""
+
+    SAMPLE_HEADER = ["time", "elapsed_s", "mb_s", "active_pct", "files_done", "threads"]
+    FILE_HEADER = ["time", "shot", "file", "bytes", "seconds", "mb_s", "result", "error"]
+
+    def __init__(self, config: dict):
+        self.config = dict(config, app_version=APP_VERSION, python=sys.version.split()[0],
+                           platform=sys.platform, buffer_mb=BUFFER_SIZE // (1024 * 1024))
+        self.t0 = time.time()
+        self.dir = data_dir() / "runs" / time.strftime("%Y%m%d_%H%M%S", time.localtime(self.t0))
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._samples = open(self.dir / "samples.csv", "w", newline="", encoding="utf-8")
+        self._files = open(self.dir / "files.csv", "w", newline="", encoding="utf-8")
+        self._sw = csv.writer(self._samples)
+        self._sw.writerow(self.SAMPLE_HEADER)
+        self._fw = csv.writer(self._files)
+        self._fw.writerow(self.FILE_HEADER)
+        self.files = 0
+        self.bytes = 0
+        self.errors = 0
+        self.rates: list = []
+        self.actives: list = []
+        self.shots: list = []
+        self._prune()
+
+    @staticmethod
+    def _prune():
+        runs = sorted((data_dir() / "runs").glob("*"))
+        for old in runs[:-MAX_RUN_FOLDERS]:
+            shutil.rmtree(old, ignore_errors=True)
+
+    def sample(self, rate: float, active: float, threads: int):
+        self.rates.append(rate)
+        self.actives.append(active)
+        self._sw.writerow([time.strftime("%H:%M:%S"), f"{time.time() - self.t0:.1f}",
+                           f"{rate:.2f}", f"{active:.1f}", self.files, threads])
+        self._samples.flush()
+
+    def file_done(self, shot: str, src: str, nbytes: int, seconds: float, result: str, error: str):
+        self.files += 1
+        if error:
+            self.errors += 1
+        if result == "copied":
+            self.bytes += nbytes
+        mbps = nbytes / seconds / 1048576 if (result == "copied" and seconds > 0) else 0.0
+        self._fw.writerow([time.strftime("%H:%M:%S"), shot, src, nbytes, f"{seconds:.3f}",
+                           f"{mbps:.2f}", result, error])
+        self._files.flush()
+
+    def shot_done(self, name: str, result: str, seconds: float):
+        self.shots.append({"shot": name, "result": result, "seconds": round(seconds, 1)})
+
+    def close(self, outcome: str):
+        duration = max(time.time() - self.t0, 1e-6)
+        avg_rate = self.bytes / duration / 1048576
+        peak = max(self.rates, default=0.0)
+        active = sum(self.actives) / len(self.actives) if self.actives else 0.0
+        c = self.config
+        summary = {
+            "outcome": outcome,
+            "start": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.t0)),
+            "duration_s": round(duration, 1), "files": self.files, "errors": self.errors,
+            "gb": round(self.bytes / 1024 ** 3, 3), "avg_mb_s": round(avg_rate, 2),
+            "peak_mb_s": round(peak, 2), "avg_active_pct": round(active, 1),
+            "config": self.config, "shots": self.shots,
+        }
+        (self.dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1),
+                                               encoding="utf-8")
+        self._samples.close()
+        self._files.close()
+        history = data_dir() / "history.csv"
+        is_new = not history.exists()
+        with open(history, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if is_new:
+                w.writerow(["start", "outcome", "duration_s", "mode", "threads", "overwrite",
+                            "shots", "files", "errors", "gb", "avg_mb_s", "peak_mb_s",
+                            "avg_active_pct", "buffer_mb", "copy_from", "paste_to", "run_folder"])
+            w.writerow([summary["start"], outcome, summary["duration_s"], c.get("mode", ""),
+                        c.get("threads", ""), c.get("overwrite", ""), c.get("shots", ""),
+                        self.files, self.errors, summary["gb"], summary["avg_mb_s"],
+                        summary["peak_mb_s"], summary["avg_active_pct"], c.get("buffer_mb", ""),
+                        c.get("copy_from", ""), c.get("paste_to", ""), self.dir.name])
+
+
 class StatCell(QFrame):
     """Titled readout with a 60-second history graph, styled like Task Manager."""
 
@@ -952,9 +1091,23 @@ class AboutDialog(QDialog):
         wallet_row.addWidget(copy_button)
         layout.addLayout(wallet_row)
 
+        bottom = QHBoxLayout()
+        logs = QPushButton("Open log folder")
+        logs.clicked.connect(self._open_logs)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
-        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        bottom.addWidget(logs)
+        bottom.addStretch(1)
+        bottom.addWidget(close)
+        layout.addLayout(bottom)
+
+    @staticmethod
+    def _open_logs():
+        try:
+            data_dir().mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
 
 
 class MainWindow(QMainWindow):
@@ -972,6 +1125,9 @@ class MainWindow(QMainWindow):
         self._preview_cache: dict = {}      # (copy_from, shot name) -> Path or None
         self._preview_worker = None
         self.io = IoStats()                     # bytes and busy time from the copy threads
+        self._logger = setup_app_log()
+        self.recorder: RunRecorder | None = None
+        self._shot_started_at = time.time()
         self._io_last = (0, 0.0, time.monotonic())
         self._io_timer = QTimer(self)
         self._io_timer.timeout.connect(self._sample_io)
@@ -1236,6 +1392,7 @@ class MainWindow(QMainWindow):
             fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
         cursor.insertText(f"{time.strftime('%H:%M:%S')}  {msg}")
+        self._logger.info(msg)
 
     def _busy(self) -> bool:
         return self._scanning or self._running
@@ -1454,6 +1611,8 @@ class MainWindow(QMainWindow):
         self._io_last = (total_bytes, busy, now)
         self.stat_active.push(active, f"{active:.0f} %")
         self.stat_rate.push(rate, f"{rate:.1f} MB/s")
+        if self.recorder is not None:
+            self.recorder.sample(rate, active, self.spin_threads.value())
 
     def _shot_folder(self, index: int):
         """Full source folder of a shot: from the scan, or from a quick search."""
@@ -1518,6 +1677,28 @@ class MainWindow(QMainWindow):
         act_copy.triggered.connect(lambda _=False: self.copy_path(path))
         act_remove.triggered.connect(lambda _=False: self.remove_selected())
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _start_recording(self, **config):
+        try:
+            self.recorder = RunRecorder(config)
+            self.log(f"Run record: {self.recorder.dir}")
+        except OSError as exc:
+            self.recorder = None
+            self.log(f"Run record not written: {exc}", C_YELLOW)
+
+    def _finish_recording(self, outcome: str):
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.close(outcome)
+        except OSError as exc:
+            self.log(f"Run record could not be finished: {exc}", C_YELLOW)
+        self.recorder = None
+
+    def _on_file_done(self, index: int, src: str, nbytes: int, seconds: float,
+                      result: str, error: str):
+        if self.recorder is not None and index < len(self.shots):
+            self.recorder.file_done(self.shots[index].name, src, nbytes, seconds, result, error)
 
     def show_about(self):
         AboutDialog(self).exec()
@@ -1731,6 +1912,13 @@ class MainWindow(QMainWindow):
         self.worker.shot_finished.connect(self._on_shot_finished)
         self.worker.overall.connect(self.progress.setValue)
         self.worker.log.connect(self.log)
+        self.worker.file_done.connect(self._on_file_done)
+        self._start_recording(mode=mode, threads=self.spin_threads.value(),
+                              overwrite=overwrite_all, dailies=dailies,
+                              copy_from=str(copy_from), paste_to=str(paste_to),
+                              shots=len(plans), files_planned=total,
+                              exts=list(self.scan_config[2]),
+                              skip_system=self.chk_skip_sys.isChecked())
         self.worker.finished.connect(self._on_worker_finished)
         self._running = True
         self._progress_block = None
@@ -1773,6 +1961,7 @@ class MainWindow(QMainWindow):
 
     def _on_shot_started(self, index: int, total: int):
         shot = self.shots[index]
+        self._shot_started_at = time.time()
         shot.state = "copying"
         shot.done = 0
         self._refresh_row(index)
@@ -1794,6 +1983,8 @@ class MainWindow(QMainWindow):
 
     def _on_shot_finished(self, index: int, result: str):
         shot = self.shots[index]
+        if self.recorder is not None:
+            self.recorder.shot_done(shot.name, result, time.time() - self._shot_started_at)
         shot.state = result
         if result == "done":
             shot.force_overwrite = False
@@ -1806,6 +1997,7 @@ class MainWindow(QMainWindow):
 
     def _on_worker_finished(self):
         stopped = self.worker.stop_event.is_set() if self.worker else False
+        self._finish_recording("stopped" if stopped else "finished")
         self._running = False
         self.log("Stopped by user." if stopped else "All shots finished.")
         self.refresh_tree()
@@ -1902,6 +2094,7 @@ class MainWindow(QMainWindow):
             self.worker.stop_event.set()
             self.worker.pause_event.clear()
             self.worker.wait(10000)
+        self._finish_recording("closed")
         self.save_session()
         event.accept()
 
