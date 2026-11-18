@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.11:** shot đã bật **Force copy** hiển thị màu bình thường thay vì màu đỏ.
   - **Version 1.10:** chuột phải vào shot và chọn **Force copy** để copy shot có số frame khác số frame mong đợi. Các file đã có sẽ bị ghi đè. Bỏ tick để quay lại trạng thái bỏ qua shot.
   - **Version 1.09:** lưu cài đặt, shot list (kèm trạng thái done/partial) và log khi thoát và mỗi 20 giây, rồi khôi phục ở lần mở sau. Shot đang copy dở khi đóng app sẽ trở lại trạng thái partial và được copy lại với overwrite.
   - **Version 1.08:** scan khớp folder có hoặc không có nhãn reel (`HHCC_R1_SC04_020_Tom_comp_v03` khớp shot `HHCC_SC04_020`), nên PUBLISH tìm được các shot này thay vì báo thiếu. Đã thêm test cho việc này.

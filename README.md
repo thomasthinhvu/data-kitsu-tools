@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.11:** a shot marked **Force copy** shows in the normal colour instead of red.
   - **Version 1.10:** right-click a shot and choose **Force copy** to copy a shot whose frame count differs from the expected count. Its existing files are overwritten. Untick it to go back to skipping the shot.
   - **Version 1.09:** settings, the shot list (with done/partial state) and the log are saved on exit and every 20 seconds, and restored on the next start. A shot that was mid-copy when the app closed comes back as partial and is re-copied with overwrite.
   - **Version 1.08:** scan matches folders with or without the reel tag (`HHCC_R1_SC04_020_Tom_comp_v03` now matches shot `HHCC_SC04_020`), so PUBLISH finds these shots instead of showing them as missing. Added a test for this.

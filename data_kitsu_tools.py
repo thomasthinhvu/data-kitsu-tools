@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -413,6 +413,8 @@ def row_style(shot: Shot) -> dict:
         return {"color": C_RED, "bold": True}
     if shot.state == "partial":
         return {"color": C_ORANGE}
+    if shot.force_copy:
+        return {}                                        # forced: normal colour, not a mismatch
     if shot.scan is not None:
         return unit_style(shot.scan.found, shot.frames)
     return {}
