@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.03"
+APP_VERSION = "1.04"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -781,7 +781,7 @@ class MainWindow(QMainWindow):
         self.btn_add.setMenu(add_menu)
         self.btn_remove = QPushButton("REMOVE")
         self.btn_remove.clicked.connect(self.remove_selected)
-        for b in (self.btn_clear, self.btn_add, self.btn_remove):
+        for b in (self.btn_add, self.btn_remove, self.btn_clear):
             b.setMinimumHeight(34)
             tree_buttons.addWidget(b)
         tree_buttons.addStretch(1)
@@ -992,12 +992,13 @@ class MainWindow(QMainWindow):
         if not indices:
             self.log("Select one or more shots first.")
             return
-        names = [self.shots[i].name for i in sorted(indices)]
-        preview = "\n".join(names[:10]) + ("\n..." if len(names) > 10 else "")
-        answer = QMessageBox.question(self, APP_NAME,
-                                      f"Remove {len(indices)} shot(s) from the list?\n\n{preview}")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        if len(indices) > 1:
+            names = [self.shots[i].name for i in sorted(indices)]
+            preview = "\n".join(names[:10]) + ("\n..." if len(names) > 10 else "")
+            answer = QMessageBox.question(self, APP_NAME,
+                                          f"Remove {len(indices)} shot(s) from the list?\n\n{preview}")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         for index in sorted(indices, reverse=True):
             del self.shots[index]
         self.log(f"Removed {len(indices)} shot(s)")
@@ -1018,44 +1019,68 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
         self._update_previews()
 
+    def _shot_folder(self, index: int):
+        """Full source folder of a shot: from the scan, or from a quick search."""
+        shot = self.shots[index]
+        if shot.scan and shot.scan.units:
+            return shot.scan.units[0].path
+        copy_from = self._copy_from()
+        if copy_from is None or not copy_from.is_dir():
+            return None
+        key = (str(copy_from), shot.name)
+        if key not in self._preview_cache:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self._preview_cache[key] = find_first_folder(copy_from, shot.name)
+            finally:
+                QApplication.restoreOverrideCursor()
+        return self._preview_cache[key]
+
     def _item_path(self, item: QTreeWidgetItem):
-        """Folder that a row points to: the variant folder, or the shot's first folder."""
+        """Folder that a row points to: the variant folder, or the shot's folder."""
         if item.parent() is not None:
             value = item.data(1, ROLE_PATH)
             return Path(value) if value else None
         index = item.data(1, ROLE_INDEX)
         if index is None or index >= len(self.shots):
             return None
-        scan = self.shots[index].scan
-        return scan.units[0].path if scan and scan.units else None
+        return self._shot_folder(index)
 
     def on_tree_context_menu(self, pos):
         item = self.tree.itemAt(pos)
         if item is None:
             return
+        if not item.isSelected():
+            self.tree.clearSelection()
+            item.setSelected(True)
         path = self._item_path(item)
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         act_open = menu.addAction("Open in Explorer")
         act_copy = menu.addAction("Copy path")
-        act_open.setEnabled(path is not None)
-        act_copy.setEnabled(path is not None)
         menu.addSeparator()
         act_remove = menu.addAction("Remove")
         act_remove.setEnabled(not self._busy())
-        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
-        if chosen is act_open:
-            self.open_path(path)
-        elif chosen is act_copy:
-            QApplication.clipboard().setText(str(path))
-            self.log(f"Copied path: {path}")
-        elif chosen is act_remove:
-            self.remove_selected()
+        if path is None:
+            act_open.setEnabled(False)
+            act_copy.setEnabled(False)
+            act_open.setToolTip("Folder not found in COPY FROM")
+            act_copy.setToolTip("Folder not found in COPY FROM")
+        act_open.triggered.connect(lambda _=False: self.open_path(path))
+        act_copy.triggered.connect(lambda _=False: self.copy_path(path))
+        act_remove.triggered.connect(lambda _=False: self.remove_selected())
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def copy_path(self, path: Path):
+        QApplication.clipboard().setText(str(path))
+        self.log(f"Copied path: {path}")
 
     def open_path(self, path: Path):
         if not path.exists():
             QMessageBox.warning(self, APP_NAME, f"Folder not found:\n{path}")
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(self, APP_NAME, f"Could not open:\n{path}")
 
     def refresh_tree(self):
         self.tree.clear()
