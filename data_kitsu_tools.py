@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.06"
+APP_VERSION = "1.07"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -1211,6 +1211,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.finished.connect(self._on_worker_finished)
         self._running = True
+        self._progress_block = None
         self.btn_pause.setText("PAUSE")
         self._update_controls()
         self.log(f"Start {mode}: {len(plans)} shot(s), {total} file(s)")
@@ -1255,8 +1256,11 @@ class MainWindow(QMainWindow):
         self._progress_stamp = time.strftime("%H:%M:%S")
         self._progress_prefix = f"Copying {shot.name}"
         self._progress_total = total
-        self.log(f"{self._progress_prefix} (0/{total} file(s))")
-        self._progress_block = self.log_view.document().lastBlock()
+        if self._progress_block is None or not self._progress_block.isValid():
+            self.log(f"{self._progress_prefix} (0/{total} file(s))")
+            self._progress_block = self.log_view.document().lastBlock()
+        else:
+            self._set_log_line(self._progress_block, f"{self._progress_prefix} (0/{total} file(s))")
 
     def _on_shot_progress(self, index: int, done: int):
         shot = self.shots[index]
@@ -1276,7 +1280,6 @@ class MainWindow(QMainWindow):
         label = {"done": "done", "partial": "stopped", "error": "finished with errors"}.get(result, result)
         self._set_log_line(self._progress_block,
                            f"{self._progress_prefix} ({shot.done}/{self._progress_total} file(s)) - {label}")
-        self._progress_block = None
 
     def _on_worker_finished(self):
         stopped = self.worker.stop_event.is_set() if self.worker else False
