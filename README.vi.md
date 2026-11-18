@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.16:** trước khi copy, app kiểm tra đích (có ghi được không, đủ dung lượng trống không, hiện dung lượng cần) và cảnh báo file nguồn rỗng, đường dẫn dài hơn 250 ký tự, file `.part` còn dở. Chặn copy nếu không đủ dung lượng. File đã có chỉ được bỏ qua khi size khớp; file bị cụt sẽ được copy lại. File được ghi xuống đĩa trước khi đổi tên. Thêm cài đặt **THREADS / SHOT** (1-16, mặc định 4) cho ổ mạng.
   - **Version 1.15:** các dòng log của shot vàng và đỏ (lý do và đường dẫn) được tô màu vàng hoặc đỏ để dễ theo dõi.
   - **Version 1.14:** nút About đổi tên thành **INFO**, đặt bên phải CLEAR. Cửa sổ About hiện chức danh (VFX Compositor), địa chỉ ví BSC kèm nút **Copy** (đổi thành *Copied*). COPY FROM và PASTE TO có nút ▾ liệt kê 10 đường dẫn gần nhất, dùng chung cho cả hai ô và được lưu cùng phiên làm việc.
   - **Version 1.13:** tiêu đề cửa sổ hiện tên tác giả (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). Nút **ABOUT ME** (góc dưới bên phải) mở cửa sổ có link liên hệ (ArtStation, LinkedIn, Facebook, Gmail) và mã QR donation đủ lớn để quét.

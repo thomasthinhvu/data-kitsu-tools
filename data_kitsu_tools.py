@@ -39,11 +39,12 @@ from PySide6.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
-    QDialog, QToolButton,
+    QDialog, QToolButton, QSpinBox,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.15"
+APP_VERSION = "1.16"
+WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
 AUTHOR = "Thomas Thinh Vu"
@@ -335,8 +336,8 @@ def mark_destination(result: ScanResult, name: str, mode: str, copy_from: Path,
     labels, first = [], None
     for unit in result.units:
         base = destination_base(unit, mode, copy_from, paste_to, dailies)
-        files = [base / src.relative_to(unit.path) for src in unit.copy_files]
-        if not files or not all(f.exists() for f in files):
+        pairs = [(src, base / src.relative_to(unit.path)) for src in unit.copy_files]
+        if not pairs or not all(same_size(src, dst) for src, dst in pairs):
             return                          # something is missing: the shot is copied as usual
         first = first or base
         label = unit_label(base, name)
@@ -345,6 +346,55 @@ def mark_destination(result: ScanResult, name: str, mode: str, copy_from: Path,
     result.copied = True
     result.dest = str(first)
     result.version_text = ", ".join(f"{label}-copied" for label in labels)
+
+
+def same_size(src: Path, dst: Path) -> bool:
+    """True when dst exists and has the same size as src, i.e. a complete copy."""
+    try:
+        return dst.stat().st_size == src.stat().st_size
+    except OSError:
+        return False
+
+
+def format_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def preflight(plans_jobs: list, paste_to: Path) -> dict:
+    """Checks made before a copy starts.
+
+    plans_jobs: list of (jobs, overwrite); jobs is a list of (source, destination).
+    """
+    need = to_copy = empty = long_paths = leftovers = 0
+    for jobs, overwrite in plans_jobs:
+        for src, dst in jobs:
+            try:
+                src_size = src.stat().st_size
+            except OSError:
+                continue                    # missing source: reported as an error during copy
+            if src_size == 0:
+                empty += 1
+            if overwrite or not same_size(src, dst):
+                need += src_size
+                to_copy += 1
+            if len(str(dst)) > WINDOWS_PATH_LIMIT:
+                long_paths += 1
+            if dst.with_name(dst.name + ".part").exists():
+                leftovers += 1
+    target = paste_to
+    while not target.exists() and target.parent != target:
+        target = target.parent              # nearest folder that exists
+    exists = target.exists()
+    return {
+        "need": need, "to_copy": to_copy, "empty": empty, "long_paths": long_paths,
+        "leftovers": leftovers,
+        "free": shutil.disk_usage(target).free if exists else None,
+        "writable": exists and os.access(target, os.W_OK),
+    }
 
 
 class IoStats:
@@ -395,8 +445,8 @@ def copy_file(src: Path, dst: Path, overwrite: bool,
     """
     if stop.is_set():
         return "stopped"
-    if dst.exists() and not overwrite:
-        return "skipped"
+    if dst.exists() and not overwrite and same_size(src, dst):
+        return "skipped"                    # complete copy already there; a short one is redone
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".part")
     try:
@@ -421,6 +471,8 @@ def copy_file(src: Path, dst: Path, overwrite: bool,
                         stats.end_io(n)
                 if not n:
                     break
+            fout.flush()
+            os.fsync(fout.fileno())         # data must reach the disk before the rename
         try:
             shutil.copystat(src, tmp)   # keep timestamps, like a copy in Explorer
         except OSError:
@@ -613,13 +665,14 @@ class CopyWorker(QThread):
     overall = Signal(int, int)              # files done, files total
     log = Signal(str)
 
-    def __init__(self, plans, io: IoStats | None = None):
+    def __init__(self, plans, io: IoStats | None = None, threads: int = MAX_WORKERS):
         super().__init__()
         # plans: list of (shot index, frames, jobs, overwrite)
         self.plans = plans
         self.pause_event = threading.Event()    # set = paused
         self.stop_event = threading.Event()     # set = stop requested
         self.io = io or IoStats()
+        self.threads = max(1, threads)
 
     def run(self):
         total = sum(len(p[2]) for p in self.plans)
@@ -629,7 +682,7 @@ class CopyWorker(QThread):
                 break
             self.shot_started.emit(index, len(jobs))
             done = errors = 0
-            executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+            executor = ThreadPoolExecutor(max_workers=self.threads)
             futures = [executor.submit(copy_file, src, dst, overwrite,
                                        self.pause_event, self.stop_event, self.io)
                        for src, dst in jobs]
@@ -1042,6 +1095,14 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.chk_skip)
         mv.addWidget(self.chk_overwrite)
         mv.addWidget(self.chk_skip_sys)
+        thread_row = QHBoxLayout()
+        thread_row.addWidget(QLabel("THREADS / SHOT"))
+        self.spin_threads = QSpinBox()
+        self.spin_threads.setRange(1, 16)
+        self.spin_threads.setValue(MAX_WORKERS)
+        self.spin_threads.setToolTip("Parallel file copies per shot. Try 8-16 for network drives.")
+        thread_row.addWidget(self.spin_threads)
+        mv.addLayout(thread_row)
         mv.addStretch(1)
         self.chk_skip.toggled.connect(self._on_skip_toggled)
         self.chk_overwrite.toggled.connect(self._on_overwrite_toggled)
@@ -1220,7 +1281,7 @@ class MainWindow(QMainWindow):
         self.btn_remove.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
-                  self.copy_hist, self.paste_hist,
+                  self.copy_hist, self.paste_hist, self.spin_threads,
                   self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
                   *self.local_checks.values(), *self.publish_checks.values()):
             w.setEnabled(not self._running)
@@ -1631,17 +1692,40 @@ class MainWindow(QMainWindow):
                                     "Shots with mismatched frames or no files are skipped.")
             return
 
+        check = preflight([(p[2], p[3]) for p in plans], paste_to)
+        if not check["writable"]:
+            QMessageBox.warning(self, APP_NAME, f"PASTE TO cannot be written to:\n{paste_to}")
+            return
+        summary = (f"{check['to_copy']} file(s) to copy, {format_bytes(check['need'])} needed"
+                   + (f", {format_bytes(check['free'])} free" if check["free"] is not None else ""))
+        if check["free"] is not None and check["need"] > check["free"]:
+            QMessageBox.warning(self, APP_NAME,
+                                f"Not enough free space on the destination.\n\n{summary}")
+            return
+        warnings = []
+        if check["empty"]:
+            warnings.append(f"{check['empty']} source file(s) are empty (0 bytes)")
+        if check["long_paths"]:
+            warnings.append(f"{check['long_paths']} destination path(s) are longer than "
+                            f"{WINDOWS_PATH_LIMIT} characters and may fail on Windows")
+        if check["leftovers"]:
+            warnings.append(f"{check['leftovers']} unfinished .part file(s) on the destination "
+                            "will be replaced")
+        self.log(f"Pre-check: {summary}")
+        for warning in warnings:
+            self.log(f"Pre-check warning: {warning}", C_YELLOW)
+        extra = "\n\n" + summary + ("\n" + "\n".join(warnings) if warnings else "")
         answer = QMessageBox.question(
             self, APP_NAME,
             f"{mode}: copy {len(plans)} shot(s), {total} file(s)?\n\n"
             f"Mode: {'OVERWRITE' if overwrite_all else 'SKIP existing files'}\n"
-            f"To: {paste_to}{os.sep}" + (f"{dailies}{os.sep}" if dailies else ""))
+            f"To: {paste_to}{os.sep}" + (f"{dailies}{os.sep}" if dailies else "") + extra)
         if answer != QMessageBox.StandardButton.Yes:
             return
 
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(0)
-        self.worker = CopyWorker(plans, self.io)
+        self.worker = CopyWorker(plans, self.io, self.spin_threads.value())
         self.worker.shot_started.connect(self._on_shot_started)
         self.worker.shot_progress.connect(self._on_shot_progress)
         self.worker.shot_finished.connect(self._on_shot_finished)
@@ -1741,6 +1825,7 @@ class MainWindow(QMainWindow):
             "dailies": self.chk_dailies.isChecked(),
             "overwrite": self.chk_overwrite.isChecked(),
             "skip_system": self.chk_skip_sys.isChecked(),
+            "threads": self.spin_threads.value(),
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
             "shots": [
                 {"name": s.name, "frames": s.frames, "state": s.state,
@@ -1781,6 +1866,7 @@ class MainWindow(QMainWindow):
             cb.setChecked(key in data.get("publish_types", []))
         self.chk_dailies.setChecked(bool(data.get("dailies", False)))
         self.chk_skip_sys.setChecked(bool(data.get("skip_system", True)))
+        self.spin_threads.setValue(int(data.get("threads", MAX_WORKERS)))
         if data.get("overwrite"):
             self.chk_overwrite.setChecked(True)
         else:

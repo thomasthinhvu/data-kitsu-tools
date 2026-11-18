@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-18]
+  - **Version 1.16:** before a copy starts, the app checks the destination (writable, enough free space, shows the space needed) and warns about empty source files, paths longer than 250 characters, and unfinished `.part` files. Blocks the copy when there is not enough space. An existing file is now skipped only when its size matches; a short file is copied again. Files are flushed to disk before they are renamed. New **THREADS / SHOT** setting (1-16, default 4) for network drives.
   - **Version 1.15:** yellow and red shots write their log lines (reason and path) in yellow or red, so they are easy to follow.
   - **Version 1.14:** the About button is now **INFO**, placed right of CLEAR. The About window shows the role (VFX Compositor), the BSC wallet address with a **Copy** button (it changes to *Copied*). COPY FROM and PASTE TO have a ▾ button listing the last 10 paths, shared by both fields and saved with the session.
   - **Version 1.13:** the window title shows the author (`Data Kitsu Tools 1.13 by Thomas Thinh Vu`). New **ABOUT ME** button (bottom right) opens a window with the contact links (ArtStation, LinkedIn, Facebook, Gmail) and the donation QR code, large enough to scan.

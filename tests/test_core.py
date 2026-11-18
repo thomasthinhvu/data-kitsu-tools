@@ -76,9 +76,14 @@ def run_tests():
     sample_src, sample_dst = jobs_p[0]
     ev, sev = threading.Event(), threading.Event()
     assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "copied"
+    # a short (incomplete) file is copied again, a complete one is skipped
     sample_dst.write_bytes(b"old")
+    assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "copied"
+    assert sample_dst.stat().st_size == sample_src.stat().st_size
     assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "skipped"
-    assert sample_dst.read_bytes() == b"old"
+    sample_dst.write_bytes(b"x" * sample_src.stat().st_size)
+    assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "skipped"
+    sample_dst.write_bytes(b"old")
     assert dkt.copy_file(sample_src, sample_dst, True, ev, sev) == "copied"
     assert sample_dst.stat().st_size == sample_src.stat().st_size
 
