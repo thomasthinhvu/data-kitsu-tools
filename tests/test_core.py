@@ -1,0 +1,115 @@
+"""Core logic tests for Data Kitsu Tools (no GUI needed)."""
+import sys, tempfile, threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import data_kitsu_tools as dkt  # noqa: E402
+
+
+def make(p: Path, n, start=1, size=2048):
+    p.mkdir(parents=True, exist_ok=True)
+    for i in range(start, start + n):
+        (p / f"{p.name}_{i:06d}.exr").write_bytes(b"x" * size)
+
+
+def build_tree(root: Path):
+    # LOCAL layout: REEL2/SC07/<shot>_PL01 and _PL02 (variant folders)
+    make(root / "REEL2/SC07/HHCC_SC07_010_PL01", 10)
+    make(root / "REEL2/SC07/HHCC_SC07_010_PL02", 8)          # short, mismatch
+    # Shot with a gap (frames 1..10 except 5)
+    d = root / "REEL2/SC07/HHCC_SC07_020"
+    make(d, 4, start=1)
+    make(d, 5, start=6)                                       # 6..10
+    # Prefix trap: 010 must not match 0100
+    make(root / "REEL2/SC09/HHCC_SC09_0100", 3)
+    # Publish layout: container with versions + system files
+    base = root / "R1_SC01/HHCC_R1_SC01_030"
+    for v in (1, 5, 6):
+        make(base / f"HHCC_R1_SC01_030_Tom_comp_v{v:02d}", 6)
+    (base / "._HHCC_R1_SC01_030_Tom_comp_v06").write_bytes(b"junk")
+    (base / ".DS_Store").write_bytes(b"junk")
+    # Empty shot folder (no files) -> yellow case
+    (root / "REEL2/SC07/HHCC_SC07_030").mkdir(parents=True)
+
+
+def run_tests():
+    tmp = Path(tempfile.mkdtemp())
+    src = tmp / "src"; dst = tmp / "dst"
+    build_tree(src)
+    names = ["HHCC_SC07_010", "HHCC_SC07_020", "HHCC_SC09_0100", "HHCC_SC07_030", "HHCC_NOPE_001",
+             "HHCC_R1_SC01_030"]
+    matched = dkt.scan_source(src, names)
+
+    # --- scan / prefix matching
+    assert len(matched["HHCC_SC07_010"]) == 2, matched["HHCC_SC07_010"]
+    assert len(matched["HHCC_SC09_0100"]) == 1
+    assert matched["HHCC_NOPE_001"] == []
+
+    # --- LOCAL analysis
+    r = dkt.analyze_shot("HHCC_SC07_010", matched["HHCC_SC07_010"], dkt.MODE_LOCAL, (".exr",), True)
+    assert r.found == 10, r.found                     # best variant has 10 files
+    assert sorted(u.label for u in r.units) == ["PL01", "PL02"], [u.label for u in r.units]
+    assert len(r.units[0].copy_files) + len(r.units[1].copy_files) == 18
+
+    r2 = dkt.analyze_shot("HHCC_SC07_020", matched["HHCC_SC07_020"], dkt.MODE_LOCAL, (), True)
+    assert r2.found == 9 and r2.missing == [5], (r2.found, r2.missing)
+
+    r3 = dkt.analyze_shot("HHCC_SC07_030", matched["HHCC_SC07_030"], dkt.MODE_LOCAL, (), True)
+    assert r3.found == 0 and r3.units and r3.units[0].found == 0
+
+    # --- PUBLISH picks the highest version, ignores system files
+    p = dkt.analyze_shot("HHCC_R1_SC01_030", matched["HHCC_R1_SC01_030"], dkt.MODE_PUBLISH,
+                         (".exr",), True)
+    assert p.version_text == "v06", p.version_text
+    assert p.found == 6 and len(p.units[0].copy_files) == 6
+    assert all("DS_Store" not in f.name and not f.name.startswith("._") for f in p.units[0].copy_files)
+
+    # --- copy jobs keep the structure (LOCAL) and flatten (PUBLISH)
+    shot = dkt.Shot("HHCC_SC07_010", 10, scan=r)
+    jobs = dkt.build_jobs(shot, dkt.MODE_LOCAL, src, dst, "")
+    assert all(str(d).startswith(str(dst / "REEL2/SC07")) for _, d in jobs)
+    shot_p = dkt.Shot("HHCC_R1_SC01_030", 6, scan=p)
+    jobs_p = dkt.build_jobs(shot_p, dkt.MODE_PUBLISH, src, dst, "261118")
+    assert all(d.parent == dst / "261118" / "HHCC_R1_SC01_030_Tom_comp_v06" for _, d in jobs_p)
+
+    # --- copy: skip mode keeps existing files, overwrite replaces them
+    sample_src, sample_dst = jobs_p[0]
+    ev, sev = threading.Event(), threading.Event()
+    assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "copied"
+    sample_dst.write_bytes(b"old")
+    assert dkt.copy_file(sample_src, sample_dst, False, ev, sev) == "skipped"
+    assert sample_dst.read_bytes() == b"old"
+    assert dkt.copy_file(sample_src, sample_dst, True, ev, sev) == "copied"
+    assert sample_dst.stat().st_size == sample_src.stat().st_size
+
+    # --- stop leaves no .part file behind
+    stop = threading.Event(); stop.set()
+    big = dst / "big.exr"
+    assert dkt.copy_file(sample_src, big, True, ev, stop) == "stopped"
+    assert not big.exists() and not big.with_name("big.exr.part").exists()
+
+    # --- full worker run (sync) with skip mode, then a second run is all skipped
+    plans = [(0, 10, jobs, False)]
+    w = dkt.CopyWorker(plans)
+    w.run()
+    assert all(d.exists() for _, d in jobs), "worker did not copy all files"
+    w2 = dkt.CopyWorker([(0, 10, jobs, False)])
+    got = []
+    w2.shot_finished.connect(lambda i, res: got.append(res))  # direct call, runs in this thread
+    w2.run()
+    assert got == ["done"], got
+
+    # --- CSV loader handles ';' separator, quotes and multi-line cells
+    csv_path = tmp / "shots.csv"
+    csv_path.write_text('"Sequence";"Name";"Description";"Frames"\n'
+                        '"R4";"HHCC_SC13_010";"Thêm sương\nkhói";"57"\n'
+                        '"R4";"HHCC_SC13_0100";"x";"31"\n'
+                        '"R4";"HHCC_SC13_010";"dup";"57"\n', encoding="utf-8")
+    shots = dkt.load_csv(csv_path)
+    assert [(s.name, s.frames) for s in shots] == [("HHCC_SC13_010", 57), ("HHCC_SC13_0100", 31)], shots
+
+    print("ALL CORE TESTS PASSED")
+
+
+if __name__ == "__main__":
+    run_tests()
