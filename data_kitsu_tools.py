@@ -24,12 +24,15 @@ import shutil
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPalette, QTextCursor
+from PySide6.QtCore import QByteArray, QPointF, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QPainter, QPalette, QPen,
+                          QPolygonF, QTextCursor)
+from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -38,7 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.11"
+APP_VERSION = "1.12"
 
 BUFFER_SIZE = 8 * 1024 * 1024   # 8 MB chunks: fewer, larger I/O calls
 MAX_WORKERS = 4                 # parallel file copies per shot
@@ -103,6 +106,9 @@ class ScanResult:
     found: int
     version_text: str
     missing: list
+    copied: bool = False            # every file already exists at the destination
+    dest: str = ""                  # destination folder that holds the copy
+    source: str = ""                # COPY FROM folder that was searched
 
 
 @dataclass
@@ -282,19 +288,78 @@ def analyze_shot(name: str, matched, mode: str, exts, skip_system: bool) -> Scan
     return ScanResult(mode, units, best_unit.found, ", ".join(labels), best_unit.gaps)
 
 
+def destination_base(unit: Unit, mode: str, copy_from: Path, paste_to: Path, dailies: str) -> Path:
+    """Folder on the destination that receives one unit."""
+    if mode == MODE_LOCAL:
+        return paste_to / unit.path.relative_to(copy_from)
+    if dailies:
+        return paste_to / dailies / unit.path.name
+    return paste_to / unit.path.name
+
+
 def build_jobs(shot: Shot, mode: str, copy_from: Path, paste_to: Path, dailies: str) -> list:
     """List of (source file, destination file) pairs for one shot."""
     jobs = []
     for unit in shot.scan.units:
-        if mode == MODE_LOCAL:
-            base = paste_to / unit.path.relative_to(copy_from)
-        elif dailies:
-            base = paste_to / dailies / unit.path.name
-        else:
-            base = paste_to / unit.path.name
+        base = destination_base(unit, mode, copy_from, paste_to, dailies)
         for src in unit.copy_files:
             jobs.append((src, base / src.relative_to(unit.path)))
     return jobs
+
+
+def mark_destination(result: ScanResult, name: str, mode: str, copy_from: Path,
+                     paste_to: Path, dailies: str):
+    """Flag a shot whose files already exist on the destination.
+
+    The Version column then shows the version found there, e.g. "v02-copied".
+    """
+    if not result.units:
+        return
+    labels, first = [], None
+    for unit in result.units:
+        base = destination_base(unit, mode, copy_from, paste_to, dailies)
+        files = [base / src.relative_to(unit.path) for src in unit.copy_files]
+        if not files or not all(f.exists() for f in files):
+            return                          # something is missing: the shot is copied as usual
+        first = first or base
+        label = unit_label(base, name)
+        if label not in labels:
+            labels.append(label)
+    result.copied = True
+    result.dest = str(first)
+    result.version_text = ", ".join(f"{label}-copied" for label in labels)
+
+
+class IoStats:
+    """Shared by all copy threads: bytes moved and time with disk I/O in progress."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.bytes = 0
+        self._busy = 0.0            # finished busy time, seconds
+        self._active = 0            # I/O calls running right now
+        self._since = 0.0           # start of the current busy stretch
+
+    def begin_io(self):
+        with self._lock:
+            if self._active == 0:
+                self._since = time.monotonic()
+            self._active += 1
+
+    def end_io(self, nbytes: int):
+        with self._lock:
+            self.bytes += nbytes
+            self._active -= 1
+            if self._active == 0:
+                self._busy += time.monotonic() - self._since
+
+    def snapshot(self):
+        """(total bytes, total busy seconds, counting a busy stretch still running)."""
+        with self._lock:
+            busy = self._busy
+            if self._active:
+                busy += time.monotonic() - self._since
+            return self.bytes, busy
 
 
 def _remove_quiet(path: Path):
@@ -305,7 +370,7 @@ def _remove_quiet(path: Path):
 
 
 def copy_file(src: Path, dst: Path, overwrite: bool,
-              paused: threading.Event, stop: threading.Event) -> str:
+              paused: threading.Event, stop: threading.Event, stats=None) -> str:
     """Copy one file in 8 MB chunks. Returns copied / skipped / stopped.
 
     Data is written to <name>.part first and renamed when complete, so a
@@ -327,10 +392,18 @@ def copy_file(src: Path, dst: Path, overwrite: bool,
                     time.sleep(0.2)
                 if stop.is_set():
                     raise _Stopped()
-                n = fin.readinto(view)
+                if stats is not None:
+                    stats.begin_io()
+                n = 0
+                try:
+                    n = fin.readinto(view) or 0
+                    if n:
+                        fout.write(view[:n])
+                finally:
+                    if stats is not None:
+                        stats.end_io(n)
                 if not n:
                     break
-                fout.write(view[:n])
         try:
             shutil.copystat(src, tmp)   # keep timestamps, like a copy in Explorer
         except OSError:
@@ -415,6 +488,8 @@ def row_style(shot: Shot) -> dict:
         return {"color": C_ORANGE}
     if shot.force_copy:
         return {}                                        # forced: normal colour, not a mismatch
+    if shot.scan is not None and shot.scan.copied:
+        return {"color": C_YELLOW}                       # already on the destination, skipped
     if shot.scan is not None:
         return unit_style(shot.scan.found, shot.frames)
     return {}
@@ -427,17 +502,27 @@ def status_text(shot: Shot) -> str:
     return f"{found}/{shot.frames}"
 
 
-def missing_tooltip(shot: Shot) -> str:
-    if not shot.scan or shot.scan.found == 0:
-        return ""
-    if shot.scan.missing:
-        shown = ", ".join(str(n) for n in shot.scan.missing[:60])
-        if len(shot.scan.missing) > 60:
-            shown += ", ..."
-        return f"Missing frames ({len(shot.scan.missing)}): {shown}"
-    if shot.scan.found != shot.frames:
-        return f"Found {shot.scan.found} file(s), CSV Frames = {shot.frames}"
-    return ""
+def shot_problem(shot: Shot):
+    """Why a shot is yellow or red: (colour, reason, path), or None when it is fine."""
+    if shot.scan is None or shot.force_copy:
+        return None
+    if shot.state in ("copying", "done", "partial", "error"):
+        return None
+    scan = shot.scan
+    if scan.copied:
+        return (C_YELLOW, f"Already on the destination ({scan.version_text}), shot skipped", scan.dest)
+    if scan.found == 0:
+        return (C_YELLOW, "No files found for this shot in COPY FROM", scan.source)
+    if scan.found != shot.frames:
+        reason = f"Frame count mismatch: found {scan.found} file(s), CSV Frames = {shot.frames}"
+        if scan.missing:
+            shown = ", ".join(str(n) for n in scan.missing[:60])
+            if len(scan.missing) > 60:
+                shown += ", ..."
+            reason += f"; missing frames ({len(scan.missing)}): {shown}"
+        path = "\n".join(str(u.path) for u in scan.units) or scan.source
+        return (C_RED, reason, path)
+    return None
 
 
 def apply_style(item: QTreeWidgetItem, style: dict):
@@ -477,19 +562,27 @@ class ScanWorker(QThread):
     """Scans the source tree in the background so the GUI stays responsive."""
     finished_scan = Signal(object, str)     # (results list, error message)
 
-    def __init__(self, names, copy_from: Path, mode: str, exts, skip_system: bool):
+    def __init__(self, names, copy_from: Path, mode: str, exts, skip_system: bool,
+                 paste_to: Path | None = None, dailies: str = ""):
         super().__init__()
         self.names = names
         self.copy_from = copy_from
         self.mode = mode
         self.exts = tuple(exts)
         self.skip_system = skip_system
+        self.paste_to = paste_to
+        self.dailies = dailies
 
     def run(self):
         try:
             matched = scan_source(self.copy_from, self.names)
             results = [analyze_shot(n, matched[n], self.mode, self.exts, self.skip_system)
                        for n in self.names]
+            for name, result in zip(self.names, results):
+                result.source = str(self.copy_from)
+                if self.paste_to is not None:
+                    mark_destination(result, name, self.mode, self.copy_from,
+                                     self.paste_to, self.dailies)
             self.finished_scan.emit(results, "")
         except Exception as exc:            # report to the GUI instead of crashing
             self.finished_scan.emit([], str(exc))
@@ -503,12 +596,13 @@ class CopyWorker(QThread):
     overall = Signal(int, int)              # files done, files total
     log = Signal(str)
 
-    def __init__(self, plans):
+    def __init__(self, plans, io: IoStats | None = None):
         super().__init__()
         # plans: list of (shot index, frames, jobs, overwrite)
         self.plans = plans
         self.pause_event = threading.Event()    # set = paused
         self.stop_event = threading.Event()     # set = stop requested
+        self.io = io or IoStats()
 
     def run(self):
         total = sum(len(p[2]) for p in self.plans)
@@ -520,7 +614,7 @@ class CopyWorker(QThread):
             done = errors = 0
             executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
             futures = [executor.submit(copy_file, src, dst, overwrite,
-                                       self.pause_event, self.stop_event)
+                                       self.pause_event, self.stop_event, self.io)
                        for src, dst in jobs]
             try:
                 for future in as_completed(futures):
@@ -635,6 +729,61 @@ class ShotTree(QTreeWidget):
 # ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
+class StatCell(QFrame):
+    """Titled readout with a 60-second history graph, styled like Task Manager."""
+
+    def __init__(self, title: str, fixed_max: float | None = None):
+        super().__init__()
+        self._title = title
+        self._fixed_max = fixed_max
+        self._text = "0"
+        self._history = deque([0.0] * 60, maxlen=60)
+        self.setMinimumHeight(60)
+        self.setMinimumWidth(220)
+
+    def push(self, value: float, text: str):
+        self._history.append(value)
+        self._text = text
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#3a3f47")))
+        painter.setBrush(QColor("#1b1d22"))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 4, 4)
+
+        font = painter.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#9aa0a8"))
+        painter.drawText(12, 20, self._title)
+        font.setPointSize(14)
+        painter.setFont(font)
+        painter.setPen(QColor("#e6e6e6"))
+        painter.drawText(12, 50, self._text)
+
+        gx0, gx1 = int(self.width() * 0.52), self.width() - 12
+        gy0, gy1 = 10, self.height() - 10
+        if gx1 > gx0 + 4 and gy1 > gy0 + 4:
+            top = self._fixed_max or max(max(self._history) * 1.15, 1.0)
+            step = (gx1 - gx0) / (len(self._history) - 1)
+            pts = [QPointF(gx0 + i * step, gy1 - min(v, top) / top * (gy1 - gy0))
+                   for i, v in enumerate(self._history)]
+            fill = QColor(C_BLUE)
+            fill.setAlpha(70)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawPolygon(QPolygonF(pts + [QPointF(gx1, gy1), QPointF(gx0, gy1)]))
+            line = QPen(QColor(C_BLUE))
+            line.setWidthF(1.5)
+            painter.setPen(line)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPolyline(QPolygonF(pts))
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -649,6 +798,11 @@ class MainWindow(QMainWindow):
         self._expanded: set = set()
         self._preview_cache: dict = {}      # (copy_from, shot name) -> Path or None
         self._preview_worker = None
+        self.io = IoStats()                     # bytes and busy time from the copy threads
+        self._io_last = (0, 0.0, time.monotonic())
+        self._io_timer = QTimer(self)
+        self._io_timer.timeout.connect(self._sample_io)
+        self._io_timer.start(1000)
         self._progress_block = None         # log line that is updated while copying
         self._progress_prefix = ""
         self._progress_total = 0
@@ -815,7 +969,12 @@ class MainWindow(QMainWindow):
         for b in (self.btn_add, self.btn_remove, self.btn_clear):
             b.setMinimumHeight(34)
             tree_buttons.addWidget(b)
-        tree_buttons.addStretch(1)
+        self.stat_active = StatCell("ACTIVE TIME", fixed_max=100.0)
+        self.stat_rate = StatCell("TRANSFER RATE")
+        tree_buttons.addSpacing(12)
+        tree_buttons.addWidget(self.stat_active, 1)
+        tree_buttons.addSpacing(8)
+        tree_buttons.addWidget(self.stat_rate, 1)
         right.addLayout(tree_buttons)
 
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1043,6 +1202,18 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
         self._update_previews()
 
+    def _sample_io(self):
+        """Once a second: transfer rate (MB/s) and active time (%) from the copy threads."""
+        now = time.monotonic()
+        total_bytes, busy = self.io.snapshot()
+        last_bytes, last_busy, last_time = self._io_last
+        elapsed = max(now - last_time, 1e-6)
+        rate = (total_bytes - last_bytes) / elapsed / (1024 * 1024)
+        active = min(100.0, max(0.0, (busy - last_busy) / elapsed * 100.0))
+        self._io_last = (total_bytes, busy, now)
+        self.stat_active.push(active, f"{active:.0f} %")
+        self.stat_rate.push(rate, f"{rate:.1f} MB/s")
+
     def _shot_folder(self, index: int):
         """Full source folder of a shot: from the scan, or from a quick search."""
         shot = self.shots[index]
@@ -1144,7 +1315,8 @@ class MainWindow(QMainWindow):
                     child.setText(3, str(shot.frames))
                     child.setText(4, f"{unit.found}/{shot.frames}")
                     child.setToolTip(4, f"Missing: {unit.gaps[:60]}" if unit.gaps else "")
-                    apply_style(child, unit_style(unit.found, shot.frames))
+                    apply_style(child, {"color": C_YELLOW} if shot.scan.copied
+                                else unit_style(unit.found, shot.frames))
                 top.setExpanded(shot.name in self._expanded)
 
     def _fill_top(self, item: QTreeWidgetItem, index: int, shot: Shot):
@@ -1153,7 +1325,10 @@ class MainWindow(QMainWindow):
         item.setText(2, shot.scan.version_text if shot.scan else "")
         item.setText(3, str(shot.frames))
         item.setText(4, status_text(shot))
-        item.setToolTip(4, missing_tooltip(shot))
+        problem = shot_problem(shot)
+        tip = f"{problem[1]}\n{problem[2]}" if problem else ""
+        for col in range(COLUMNS):
+            item.setToolTip(col, tip)
         apply_style(item, row_style(shot))
 
     def _refresh_row(self, index: int):
@@ -1187,8 +1362,10 @@ class MainWindow(QMainWindow):
         self._scanning = True
         self._update_controls()
         self.log(f"{mode}: scanning {len(self.shots)} shot(s) under {copy_from} ...")
+        paste_to = self._paste_to()
+        dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
         self.scan_worker = ScanWorker([s.name for s in self.shots], copy_from,
-                                      mode, config[2], config[3])
+                                      mode, config[2], config[3], paste_to, dailies)
         self.scan_worker.finished_scan.connect(
             lambda results, error, cfg=config: self._on_scan_done(results, error, cfg))
         self.scan_worker.start()
@@ -1204,10 +1381,23 @@ class MainWindow(QMainWindow):
                 if shot.state not in ("done", "partial"):
                     shot.state = "scanned"
             self.scan_config = config
-            ok = sum(1 for s in self.shots if s.scan and s.scan.found == s.frames and s.scan.found)
-            mism = sum(1 for s in self.shots if s.scan and s.scan.found and s.scan.found != s.frames)
-            none = sum(1 for s in self.shots if not s.scan or s.scan.found == 0)
-            self.log(f"Scan done: {ok} ready, {mism} mismatch (skipped), {none} without files")
+            copied = sum(1 for s in self.shots if s.scan and s.scan.copied)
+            ok = sum(1 for s in self.shots if s.scan and not s.scan.copied
+                     and s.scan.found == s.frames and s.scan.found)
+            mism = sum(1 for s in self.shots if s.scan and not s.scan.copied
+                       and s.scan.found and s.scan.found != s.frames)
+            none = sum(1 for s in self.shots if not s.scan or (s.scan.found == 0 and not s.scan.copied))
+            self.log(f"Scan done: {ok} ready, {copied} already copied (skipped), "
+                     f"{mism} mismatch (skipped), {none} without files")
+            for s in self.shots:
+                problem = shot_problem(s)
+                if problem is None:
+                    continue
+                colour, reason, path = problem
+                tag = "YELLOW" if colour == C_YELLOW else "RED"
+                self.log(f"  [{tag}] {s.name}: {reason}")
+                for line in path.splitlines():
+                    self.log(f"      path: {line}")
         self.refresh_tree()
         self._update_previews()
         self._update_controls()
@@ -1240,7 +1430,8 @@ class MainWindow(QMainWindow):
         for i, shot in enumerate(self.shots):
             # Shots with a count mismatch, no files, or already done are skipped
             if (shot.scan is None or shot.state == "done" or shot.scan.found == 0
-                    or (shot.scan.found != shot.frames and not shot.force_copy)):
+                    or (shot.scan.found != shot.frames and not shot.force_copy)
+                    or (shot.scan.copied and not (overwrite_all or shot.force_copy))):
                 continue
             jobs = build_jobs(shot, mode, copy_from, paste_to, dailies)
             if not jobs:
@@ -1264,7 +1455,7 @@ class MainWindow(QMainWindow):
 
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(0)
-        self.worker = CopyWorker(plans)
+        self.worker = CopyWorker(plans, self.io)
         self.worker.shot_started.connect(self._on_shot_started)
         self.worker.shot_progress.connect(self._on_shot_progress)
         self.worker.shot_finished.connect(self._on_shot_finished)
