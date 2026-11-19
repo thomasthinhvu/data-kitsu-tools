@@ -97,6 +97,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-19]
+  - **Version 1.22:** bỏ hai nút ▾ cạnh nút "..." của COPY FROM và PASTE TO. Danh sách đường dẫn gần đây mở bằng cách bấm vào ô. Khi kéo một thư mục qua ô đường dẫn, ô sẽ được tô viền xanh.
   - **Version 1.21:** nút **CLEAR** cũng xoá nội dung log trên màn hình. Hộp xác nhận hỏi xoá cả shot list và log, hoặc chỉ log khi danh sách shot đang trống. File log của app trên đĩa không bị xoá.
   - **Version 1.20:** việc khớp tên shot dùng một cơ sở dữ liệu tên được rút ra từ các file CSV của Kitsu. Quy tắc: số reel (R1, R2...) là tùy chọn, số 0 đứng đầu không quan trọng (`010` = `10`) nhưng `050` và `0050` được tách riêng khi cả hai cùng tồn tại, nhận diện được chữ cái (`01A`, `01_A`), số thập phân (`0043.5`) và biến thể dấu gạch ngang (`010-add02`), và khi nhiều shot khớp với một thư mục thì tên dài nhất thắng (`_PL01` thắng shot gốc). Thư mục không có số reel chỉ khớp khi số shot đó là duy nhất trong CSV.
   - **Cột Seq:** SHOTS LIST có cột **SEQ** nằm giữa NO và NAME, lấy từ cột *Sequence* của CSV. Tên chỉ là số (`010`) sẽ lấy Sequence làm tiền tố (`R1_SC03` -> `R1_SC03_010`).

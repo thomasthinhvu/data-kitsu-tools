@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -863,15 +863,26 @@ class PathEdit(QLineEdit):
         if event.button() == Qt.MouseButton.LeftButton:
             self.opened.emit()
 
+    DROP_HOVER_STYLE = "QLineEdit { border: 2px solid #3b82f6; background-color: rgba(59, 130, 246, 0.15); }"
+
+    def _set_drop_hover(self, on: bool):
+        self.setStyleSheet(self.DROP_HOVER_STYLE if on else "")
+
     def dragEnterEvent(self, event):
         if local_paths(event.mimeData()):
             event.acceptProposedAction()
+            self._set_drop_hover(True)      # highlight the box while a folder hovers over it
         else:
             event.ignore()
 
     dragMoveEvent = dragEnterEvent
 
+    def dragLeaveEvent(self, event):
+        self._set_drop_hover(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self._set_drop_hover(False)
         paths = local_paths(event.mimeData())
         if paths:
             p = paths[0]
@@ -1403,10 +1414,6 @@ class MainWindow(QMainWindow):
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn):
             w.setFixedHeight(path_height)
         self.path_history: list = []        # shared by COPY FROM and PASTE TO, newest first
-        self.copy_hist = self._history_button(self.copy_edit)
-        self.paste_hist = self._history_button(self.paste_edit)
-        for w in (self.copy_hist, self.paste_hist):
-            w.setFixedHeight(path_height)
         self.copy_edit.opened.connect(lambda e=self.copy_edit: self._show_history(e))
         self.paste_edit.opened.connect(lambda e=self.paste_edit: self._show_history(e))
         self.copy_edit.editingFinished.connect(lambda e=self.copy_edit: self.remember_path(e.text()))
@@ -1421,12 +1428,10 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("COPY FROM"), 0, 0)
         grid.addWidget(self.copy_edit, 0, 1)
         grid.addWidget(self.copy_btn, 0, 2)
-        grid.addWidget(self.copy_hist, 0, 3)
         grid.addWidget(self.copy_preview, 1, 1, 1, 2)
         grid.addWidget(QLabel("PASTE TO"), 2, 0)
         grid.addWidget(self.paste_edit, 2, 1)
         grid.addWidget(self.paste_btn, 2, 2)
-        grid.addWidget(self.paste_hist, 2, 3)
         grid.addWidget(self.paste_preview, 3, 1, 1, 2)
         left.addWidget(paths_box)
         self.copy_edit.textChanged.connect(self._update_previews)
@@ -1667,7 +1672,7 @@ class MainWindow(QMainWindow):
         self.btn_remove.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
-                  self.copy_hist, self.paste_hist, self.spin_threads,
+                  self.spin_threads,
                   self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
                   *self.local_checks.values(), *self.publish_checks.values()):
             w.setEnabled(not self._running)
@@ -1686,15 +1691,6 @@ class MainWindow(QMainWindow):
         if folder:
             edit.setText(folder)
             self.remember_path(folder)
-
-    def _history_button(self, edit: PathEdit) -> QToolButton:
-        """The ▾ button: same recent-path list as clicking the field."""
-        button = QToolButton()
-        button.setText("▾")
-        button.setToolTip(f"Recent paths (last {PATH_HISTORY_MAX}, shared by COPY FROM and PASTE TO)")
-        button.setFixedWidth(30)
-        button.clicked.connect(lambda: self._show_history(edit))
-        return button
 
     def _show_history(self, edit: PathEdit):
         edit.set_history(self.path_history)
