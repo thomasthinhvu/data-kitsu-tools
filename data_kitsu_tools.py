@@ -31,7 +31,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPointF, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (QByteArray, QPointF, QSize, QStandardPaths, Qt, QStringListModel,
+                            QThread, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen,
                           QTextCharFormat,
                           QPixmap, QPolygonF, QTextCursor)
@@ -43,11 +44,11 @@ from PySide6.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
-    QDialog, QToolButton, QSpinBox,
+    QDialog, QToolButton, QSpinBox, QCompleter,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.19"
+APP_VERSION = "1.20"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -95,7 +96,9 @@ C_BLUE = "#3aa0ff"
 C_GREY = "#8a8f98"
 C_ORANGE = "#ff9f43"
 
-COLUMNS = 5
+COLUMNS = 6
+# SHOTS LIST columns
+COL_NO, COL_SEQ, COL_NAME, COL_VERSION, COL_FRAMES, COL_STATUS = range(6)
 ROLE_INDEX = int(Qt.ItemDataRole.UserRole) + 1   # shot index stored on top rows
 ROLE_PATH = int(Qt.ItemDataRole.UserRole) + 2    # folder path stored on variant rows
 
@@ -136,12 +139,22 @@ class ScanResult:
 @dataclass
 class Shot:
     name: str
-    frames: int
+    frames: int | None              # None = the CSV has no Frames value for this shot
     scan: ScanResult | None = None
     state: str = "new"              # new | scanned | copying | done | partial | error
     done: int = 0
     force_overwrite: bool = False   # set after STOP so the next run overwrites
     force_copy: bool = False        # user chose "Force copy": copy despite a frame mismatch, overwrite
+    seq: str = ""                   # Sequence column of the CSV (shown in the SEQ column)
+
+
+def frames_text(frames) -> str:
+    return "?" if frames is None else str(frames)
+
+
+def frames_match(found: int, frames) -> bool:
+    """True when the file count fits the CSV. Without a CSV count, any count fits."""
+    return frames is None or found == frames
 
 
 # ----------------------------------------------------------------------------
@@ -189,54 +202,99 @@ def tree_files(folder: Path, exts, skip_system: bool) -> list:
     return sorted(result)
 
 
-REEL_TAG_RE = re.compile(r"^([A-Za-z]+)_R\d+_")
+REEL_TOKEN_RE = re.compile(r"^r\d+$")          # reel tag such as R1 (lower-cased)
+NUMBER_TOKEN_RE = re.compile(r"^(\d+)(\.\d+)?([a-z]?)$")
 
 
-def normalize_folder_name(name: str) -> str:
-    """HHCC_R1_SC04_020_Tom_comp_v03 -> HHCC_SC04_020_Tom_comp_v03.
+def name_tokens(name: str, keep_reel: bool = True, strict: bool = False) -> tuple:
+    """Split a shot or folder name into tokens that can be compared.
 
-    Folders sometimes carry a reel tag (R1_, R3_...) that the CSV name does not have.
+    - "-" and "_" both separate tokens: "010-add02" -> ("10", "add02")
+    - strict=False: numbers lose their leading zeros ("010" == "10")
+    - strict=True: numbers keep their zeros ("050" != "0050"), used first so that
+      two shots written differently in the same CSV never swap folders
+    - a single letter after a number is merged: "01 A" / "01_A" -> "1a"
+    - keep_reel=False drops the reel tag in position 1 (HHCC_R1_SC04_020 -> HHCC_SC04_020)
     """
-    return REEL_TAG_RE.sub(r"\1_", name, count=1)
+    raw = [t for t in re.split(r"[_\-\s]+", name.strip().casefold()) if t]
+    tokens = []
+    for i, tok in enumerate(raw):
+        if i == 1 and not keep_reel and REEL_TOKEN_RE.match(tok) and raw[0].isalpha():
+            continue
+        m = NUMBER_TOKEN_RE.match(tok)
+        if m and not strict:
+            tok = str(int(m.group(1))) + (m.group(2) or "") + m.group(3)
+        if len(tok) == 1 and tok.isalpha() and tokens and re.fullmatch(r"\d+(\.\d+)?", tokens[-1]):
+            tokens[-1] += tok                   # "10" + "a" -> "10a"
+            continue
+        tokens.append(tok)
+    return tuple(tokens)
+
+
+class ShotIndex:
+    """Looks up which shot names a folder belongs to, using the naming rules above.
+
+    A folder belongs to a shot when the shot's tokens are the first tokens of the
+    folder name. Rules, in order:
+    - the reel tag is compared first; without it, the shot must be the only one
+      with that key (HHCC_R1_010 and HHCC_R2_010 both exist, so a folder with no reel
+      tag matches nothing)
+    - the longest match wins: HHCC_SC07_010_PL01 goes to HHCC_SC07_010_PL01 when
+      that shot is in the CSV, and to HHCC_SC07_010 otherwise
+    - exact spelling (zeros kept) beats the normalised spelling at the same length
+    """
+
+    def __init__(self, names):
+        self.tables = {}
+        for strict in (True, False):
+            for keep_reel in (True, False):
+                table = {}
+                for name in names:
+                    table.setdefault(name_tokens(name, keep_reel, strict), []).append(name)
+                self.tables[(strict, keep_reel)] = table
+
+    def match_folder(self, folder_name: str) -> list:
+        hits = []                           # (token count, exact spelling, shot name)
+        for strict in (True, False):
+            for keep_reel in (True, False):
+                tokens = name_tokens(folder_name, keep_reel, strict)
+                table = self.tables[(strict, keep_reel)]
+                for k in range(1, len(tokens) + 1):
+                    found = table.get(tokens[:k])
+                    if not found or (not keep_reel and len(found) != 1):
+                        continue
+                    hits.extend((k, strict, shot) for shot in found)
+        if not hits:
+            return []
+        best = max((k, strict) for k, strict, _ in hits)
+        return sorted({shot for k, strict, shot in hits if (k, strict) == best})
 
 
 def folder_matches(folder_name: str, shot_name: str) -> bool:
-    """True when a folder belongs to a shot, with or without the reel tag."""
-    for variant in (folder_name, normalize_folder_name(folder_name)):
-        if variant == shot_name or variant.startswith(shot_name + "_"):
-            return True
-    return False
+    """True when a folder belongs to a shot (checked on its own, no other shots)."""
+    return bool(ShotIndex([shot_name]).match_folder(folder_name))
 
 
 def scan_source(copy_from: Path, names) -> dict:
-    """Walk the source tree once and return {shot name: [matching folders]}.
-
-    A folder matches a shot when its name equals the shot name or starts with
-    "<shot>_". That underscore stops HHCC_SC14_010 from matching HHCC_SC14_0100.
-    """
-    wanted = set(names)
+    """Walk the source tree once and return {shot name: [matching folders]}."""
+    names = list(dict.fromkeys(names))
+    index = ShotIndex(names)
     matches = {n: [] for n in names}
     for dirpath, dirnames, _ in os.walk(copy_from):
         dirnames[:] = [d for d in dirnames if not is_system_name(d)]
         for d in dirnames:
-            hits = set()
-            for variant in {d, normalize_folder_name(d)}:
-                parts = variant.split("_")
-                for k in range(1, len(parts) + 1):
-                    candidate = "_".join(parts[:k])
-                    if candidate in wanted:
-                        hits.add(candidate)
-            for candidate in hits:
-                matches[candidate].append(Path(dirpath) / d)
+            for shot in index.match_folder(d):
+                matches[shot].append(Path(dirpath) / d)
     return matches
 
 
-def find_first_folder(root: Path, name: str):
-    """Return the first folder under root matching a shot name (fast, used for previews)."""
+def find_first_folder(root: Path, name: str, names=None):
+    """Return the first folder under root that belongs to a shot (used for previews)."""
+    index = ShotIndex(names or [name])
     for dirpath, dirnames, _ in os.walk(root):
         dirnames[:] = [d for d in dirnames if not is_system_name(d)]
         for d in dirnames:
-            if folder_matches(d, name):
+            if name in index.match_folder(d):
                 return Path(dirpath) / d
     return None
 
@@ -251,16 +309,18 @@ def latest_version(paths):
     return best, best_v
 
 
-def unit_label(folder: Path, shot_name: str) -> str:
-    """Short label for the Version column: PL01, v06 or the leftover suffix."""
-    suffix = normalize_folder_name(folder.name)[len(shot_name):]
-    m = VARIANT_RE.search(suffix)
+def unit_label(folder: Path, shot_name: str = "") -> str:
+    """Short label for the Version column: PL01, v06, -add02 or base."""
+    name = folder.name
+    m = VARIANT_RE.search(name)
     if m:
         return m.group(1).upper()
-    m = VERSION_RE.search(suffix)
+    m = VERSION_RE.search(name)
     if m:
         return f"v{int(m.group(1)):02d}"
-    return suffix.lstrip("_") or "base"
+    if "-" in name:
+        return name.rsplit("-", 1)[1]
+    return "base"
 
 
 def frame_gaps(files) -> list:
@@ -507,8 +567,15 @@ def read_text(path: Path) -> str:
     return raw.decode("latin-1", errors="replace")
 
 
+BARE_NAME_RE = re.compile(r"^\d")                 # "010", "0043.5", "010-add02"
+
+
 def load_csv(path: Path) -> list:
-    """Read the Name and Frames columns of a Kitsu CSV (';' or ',' separated)."""
+    """Read a Kitsu CSV: Sequence, Name and Frames ('frame' also accepted).
+
+    A Name that is only a number ("010") takes the Sequence as its prefix when the
+    Sequence holds a reel/scene tag ("R1_SC03" -> "R1_SC03_010").
+    """
     text = read_text(path)
     lines = text.splitlines()
     if not lines:
@@ -519,33 +586,41 @@ def load_csv(path: Path) -> list:
     if "name" not in header:
         raise ValueError('No "Name" column found in this CSV.')
     name_idx = header.index("name")
-    frames_idx = header.index("frames") if "frames" in header else None
+    seq_idx = header.index("sequence") if "sequence" in header else None
+    frames_idx = next((header.index(h) for h in ("frames", "frame") if h in header), None)
+
+    def cell(row, idx):
+        return row[idx].strip() if idx is not None and idx < len(row) else ""
 
     shots, seen = [], set()
     for row in rows[1:]:
         if len(row) <= name_idx:
             continue
         name = row[name_idx].strip()
+        seq = cell(row, seq_idx)
+        if name and BARE_NAME_RE.match(name) and "_" in seq:
+            name = f"{seq}_{name}"
         if not name or name in seen or "/" in name or "\\" in name:
             continue
         seen.add(name)
-        frames = 0
-        if frames_idx is not None and frames_idx < len(row):
+        frames = None
+        raw = cell(row, frames_idx)
+        if raw:
             try:
-                frames = int(float(row[frames_idx].strip().replace(",", ".") or 0))
+                frames = int(float(raw.replace(",", ".")))
             except ValueError:
-                frames = 0
-        shots.append(Shot(name=name, frames=frames))
+                frames = None
+        shots.append(Shot(name=name, frames=frames, seq=seq))
     return shots
 
 
 # ----------------------------------------------------------------------------
 # Status / colour rules
 # ----------------------------------------------------------------------------
-def unit_style(found: int, frames: int) -> dict:
+def unit_style(found: int, frames) -> dict:
     if found == 0:
         return {"color": C_YELLOW}                       # no files after scan
-    if found != frames:
+    if not frames_match(found, frames):
         return {"color": C_RED, "bold": True}            # count mismatch, shot skipped
     return {}
 
@@ -570,9 +645,9 @@ def row_style(shot: Shot) -> dict:
 
 def status_text(shot: Shot) -> str:
     if shot.state in ("copying", "done", "partial", "error"):
-        return f"{shot.done}/{shot.frames}"
+        return f"{shot.done}/{frames_text(shot.frames)}"
     found = shot.scan.found if shot.scan else 0
-    return f"{found}/{shot.frames}"
+    return f"{found}/{frames_text(shot.frames)}"
 
 
 def shot_problem(shot: Shot):
@@ -586,7 +661,7 @@ def shot_problem(shot: Shot):
         return (C_YELLOW, f"Already on the destination ({scan.version_text}), shot skipped", scan.dest)
     if scan.found == 0:
         return (C_YELLOW, "No files found for this shot in COPY FROM", scan.source)
-    if scan.found != shot.frames:
+    if not frames_match(scan.found, shot.frames):
         reason = f"Frame count mismatch: found {scan.found} file(s), CSV Frames = {shot.frames}"
         if scan.missing:
             shown = ", ".join(str(n) for n in scan.missing[:60])
@@ -618,14 +693,15 @@ class PreviewWorker(QThread):
     """Looks up the full source folder of the first shot so the preview can show it."""
     found = Signal(str, str, str)           # copy_from, shot name, folder path ("" = none)
 
-    def __init__(self, copy_from: Path, name: str):
+    def __init__(self, copy_from: Path, name: str, names=None):
         super().__init__()
         self.copy_from = copy_from
         self.name = name
+        self.names = names
 
     def run(self):
         try:
-            path = find_first_folder(self.copy_from, self.name)
+            path = find_first_folder(self.copy_from, self.name, self.names)
         except OSError:
             path = None
         self.found.emit(str(self.copy_from), self.name, str(path) if path else "")
@@ -747,13 +823,45 @@ def local_paths(mime) -> list:
 
 
 class PathEdit(QLineEdit):
-    """Line edit that accepts a folder dragged from Explorer / Finder / file manager."""
+    """Path field: accepts dropped folders and shows recent paths like Explorer's address bar.
+
+    A click on the field opens the recent-path list at once. Typing keeps working:
+    the list narrows as you type, Esc closes it.
+    """
     committed = Signal(str)                 # a dropped folder was put into the field
+    opened = Signal()                       # the user clicked the field (show history)
 
     def __init__(self, placeholder: str = ""):
         super().__init__()
         self.setAcceptDrops(True)
         self.setPlaceholderText(placeholder)
+        self._history = QStringListModel(self)
+        self._completer = QCompleter(self._history, self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._completer.activated[str].connect(self._on_history_picked)
+        self.setCompleter(self._completer)
+
+    def set_history(self, paths):
+        self._history.setStringList(list(paths))
+
+    def show_history(self):
+        """Open the list with every entry (not only the ones matching the text)."""
+        if self._history.rowCount() == 0:
+            return
+        self.setFocus()
+        self._completer.setCompletionPrefix("")
+        self._completer.complete()
+
+    def _on_history_picked(self, text: str):
+        self.setText(text)
+        self.committed.emit(text)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.opened.emit()
 
     def dragEnterEvent(self, event):
         if local_paths(event.mimeData()):
@@ -1299,6 +1407,8 @@ class MainWindow(QMainWindow):
         self.paste_hist = self._history_button(self.paste_edit)
         for w in (self.copy_hist, self.paste_hist):
             w.setFixedHeight(path_height)
+        self.copy_edit.opened.connect(lambda e=self.copy_edit: self._show_history(e))
+        self.paste_edit.opened.connect(lambda e=self.paste_edit: self._show_history(e))
         self.copy_edit.editingFinished.connect(lambda e=self.copy_edit: self.remember_path(e.text()))
         self.paste_edit.editingFinished.connect(lambda e=self.paste_edit: self.remember_path(e.text()))
         self.copy_edit.committed.connect(self.remember_path)
@@ -1406,7 +1516,7 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         right.addWidget(title)
         self.tree = ShotTree()
-        self.tree.setHeaderLabels(["NO", "NAME", "VERSION", "FRAMES", "STATUS"])
+        self.tree.setHeaderLabels(["NO", "SEQ", "NAME", "VERSION", "FRAMES", "STATUS"])
         self.tree.setRootIsDecorated(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setUniformRowHeights(True)
@@ -1415,11 +1525,12 @@ class MainWindow(QMainWindow):
         self.tree.itemCollapsed.connect(self._on_collapsed)
         header = self.tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.tree.setColumnWidth(0, 60)
-        self.tree.setColumnWidth(2, 140)
-        self.tree.setColumnWidth(3, 80)
-        self.tree.setColumnWidth(4, 120)
+        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        self.tree.setColumnWidth(COL_NO, 60)
+        self.tree.setColumnWidth(COL_SEQ, 90)
+        self.tree.setColumnWidth(COL_VERSION, 140)
+        self.tree.setColumnWidth(COL_FRAMES, 80)
+        self.tree.setColumnWidth(COL_STATUS, 120)
         right.addWidget(self.tree, 1)
 
         tree_buttons = QHBoxLayout()
@@ -1577,28 +1688,17 @@ class MainWindow(QMainWindow):
             self.remember_path(folder)
 
     def _history_button(self, edit: PathEdit) -> QToolButton:
-        """Small drop-down button listing the recent paths."""
+        """The ▾ button: same recent-path list as clicking the field."""
         button = QToolButton()
         button.setText("▾")
         button.setToolTip(f"Recent paths (last {PATH_HISTORY_MAX}, shared by COPY FROM and PASTE TO)")
         button.setFixedWidth(30)
-        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(button)
-        menu.aboutToShow.connect(lambda: self._fill_history_menu(menu, edit))
-        button.setMenu(menu)
+        button.clicked.connect(lambda: self._show_history(edit))
         return button
 
-    def _fill_history_menu(self, menu: QMenu, edit: PathEdit):
-        menu.clear()
-        if not self.path_history:
-            menu.addAction("(no recent paths)").setEnabled(False)
-            return
-        for path in self.path_history:
-            menu.addAction(path, lambda p=path, e=edit: self.choose_path(e, p))
-
-    def choose_path(self, edit: PathEdit, path: str):
-        edit.setText(path)
-        self.remember_path(path)
+    def _show_history(self, edit: PathEdit):
+        edit.set_history(self.path_history)
+        edit.show_history()
 
     def remember_path(self, text: str):
         """Put a folder at the top of the shared history (duplicates move up)."""
@@ -1685,7 +1785,7 @@ class MainWindow(QMainWindow):
         indices = set()
         for item in self.tree.selectedItems():
             owner = item if item.parent() is None else item.parent()
-            index = owner.data(1, ROLE_INDEX)
+            index = owner.data(COL_NAME, ROLE_INDEX)
             if index is not None:
                 indices.add(index)
         if not indices:
@@ -1744,7 +1844,8 @@ class MainWindow(QMainWindow):
         if key not in self._preview_cache:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
-                self._preview_cache[key] = find_first_folder(copy_from, shot.name)
+                self._preview_cache[key] = find_first_folder(
+                    copy_from, shot.name, [s.name for s in self.shots])
             finally:
                 QApplication.restoreOverrideCursor()
         return self._preview_cache[key]
@@ -1752,9 +1853,9 @@ class MainWindow(QMainWindow):
     def _item_path(self, item: QTreeWidgetItem):
         """Folder that a row points to: the variant folder, or the shot's folder."""
         if item.parent() is not None:
-            value = item.data(1, ROLE_PATH)
+            value = item.data(COL_NAME, ROLE_PATH)
             return Path(value) if value else None
-        index = item.data(1, ROLE_INDEX)
+        index = item.data(COL_NAME, ROLE_INDEX)
         if index is None or index >= len(self.shots):
             return None
         return self._shot_folder(index)
@@ -1772,7 +1873,7 @@ class MainWindow(QMainWindow):
         act_open = menu.addAction("Open in Explorer")
         act_copy = menu.addAction("Copy path")
         if item.parent() is None:
-            index = item.data(1, ROLE_INDEX)
+            index = item.data(COL_NAME, ROLE_INDEX)
             if index is not None and index < len(self.shots):
                 shot = self.shots[index]
                 act_force = menu.addAction("Force copy")
@@ -1845,29 +1946,30 @@ class MainWindow(QMainWindow):
         self.tree.set_hint(not self.shots)
         for i, shot in enumerate(self.shots):
             top = QTreeWidgetItem(self.tree)
-            top.setData(0, Qt.ItemDataRole.UserRole, shot.name)
-            top.setData(1, ROLE_INDEX, i)
+            top.setData(COL_NAME, Qt.ItemDataRole.UserRole, shot.name)
+            top.setData(COL_NAME, ROLE_INDEX, i)
             self.items[i] = top
             self._fill_top(top, i, shot)
             if shot.scan and len(shot.scan.units) > 1:
                 for unit in shot.scan.units:
                     child = QTreeWidgetItem(top)
-                    child.setText(1, unit.path.name)
-                    child.setData(1, ROLE_PATH, str(unit.path))
-                    child.setText(2, unit.label)
-                    child.setText(3, str(shot.frames))
-                    child.setText(4, f"{unit.found}/{shot.frames}")
-                    child.setToolTip(4, f"Missing: {unit.gaps[:60]}" if unit.gaps else "")
+                    child.setText(COL_NAME, unit.path.name)
+                    child.setData(COL_NAME, ROLE_PATH, str(unit.path))
+                    child.setText(COL_VERSION, unit.label)
+                    child.setText(COL_FRAMES, frames_text(shot.frames))
+                    child.setText(COL_STATUS, f"{unit.found}/{frames_text(shot.frames)}")
+                    child.setToolTip(COL_STATUS, f"Missing: {unit.gaps[:60]}" if unit.gaps else "")
                     apply_style(child, {"color": C_YELLOW} if shot.scan.copied
                                 else unit_style(unit.found, shot.frames))
                 top.setExpanded(shot.name in self._expanded)
 
     def _fill_top(self, item: QTreeWidgetItem, index: int, shot: Shot):
-        item.setText(0, str(index + 1))
-        item.setText(1, shot.name)
-        item.setText(2, shot.scan.version_text if shot.scan else "")
-        item.setText(3, str(shot.frames))
-        item.setText(4, status_text(shot))
+        item.setText(COL_NO, str(index + 1))
+        item.setText(COL_SEQ, shot.seq)
+        item.setText(COL_NAME, shot.name)
+        item.setText(COL_VERSION, shot.scan.version_text if shot.scan else "")
+        item.setText(COL_FRAMES, frames_text(shot.frames))
+        item.setText(COL_STATUS, status_text(shot))
         problem = shot_problem(shot)
         tip = f"{problem[1]}\n{problem[2]}" if problem else ""
         for col in range(COLUMNS):
@@ -1880,12 +1982,12 @@ class MainWindow(QMainWindow):
             self._fill_top(item, index, self.shots[index])
 
     def _on_expanded(self, item: QTreeWidgetItem):
-        name = item.data(0, Qt.ItemDataRole.UserRole)
+        name = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
         if name:
             self._expanded.add(name)
 
     def _on_collapsed(self, item: QTreeWidgetItem):
-        name = item.data(0, Qt.ItemDataRole.UserRole)
+        name = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
         if name:
             self._expanded.discard(name)
 
@@ -1926,9 +2028,9 @@ class MainWindow(QMainWindow):
             self.scan_config = config
             copied = sum(1 for s in self.shots if s.scan and s.scan.copied)
             ok = sum(1 for s in self.shots if s.scan and not s.scan.copied
-                     and s.scan.found == s.frames and s.scan.found)
+                     and frames_match(s.scan.found, s.frames) and s.scan.found)
             mism = sum(1 for s in self.shots if s.scan and not s.scan.copied
-                       and s.scan.found and s.scan.found != s.frames)
+                       and s.scan.found and not frames_match(s.scan.found, s.frames))
             none = sum(1 for s in self.shots if not s.scan or (s.scan.found == 0 and not s.scan.copied))
             self.log(f"Scan done: {ok} ready, {copied} already copied (skipped), "
                      f"{mism} mismatch (skipped), {none} without files")
@@ -1976,7 +2078,7 @@ class MainWindow(QMainWindow):
         for i, shot in enumerate(self.shots):
             # Shots with a count mismatch, no files, or already done are skipped
             if (shot.scan is None or shot.state == "done" or shot.scan.found == 0
-                    or (shot.scan.found != shot.frames and not shot.force_copy)
+                    or (not frames_match(shot.scan.found, shot.frames) and not shot.force_copy)
                     or (shot.scan.copied and not (overwrite_all or shot.force_copy))):
                 continue
             jobs = build_jobs(shot, mode, copy_from, paste_to, dailies)
@@ -2138,7 +2240,7 @@ class MainWindow(QMainWindow):
             "threads": self.spin_threads.value(),
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
             "shots": [
-                {"name": s.name, "frames": s.frames, "state": s.state,
+                {"name": s.name, "frames": s.frames, "seq": s.seq, "state": s.state,
                  "done": s.done, "force_overwrite": s.force_overwrite,
                  "force_copy": s.force_copy}
                 for s in self.shots
@@ -2188,7 +2290,10 @@ class MainWindow(QMainWindow):
 
         shots = []
         for item in data.get("shots", []):
-            shot = Shot(name=str(item["name"]), frames=int(item.get("frames", 0)))
+            frames = item.get("frames")
+            shot = Shot(name=str(item["name"]),
+                        frames=None if frames is None else int(frames),
+                        seq=str(item.get("seq", "")))
             state = item.get("state", "new")
             if state == "copying":          # app was closed mid-copy: resume with overwrite
                 state = "partial"
@@ -2237,7 +2342,8 @@ class MainWindow(QMainWindow):
             return
         if self._preview_worker is not None and self._preview_worker.isRunning():
             return                          # the finished worker will trigger the next search
-        self._preview_worker = PreviewWorker(copy_from, self.shots[0].name)
+        self._preview_worker = PreviewWorker(copy_from, self.shots[0].name,
+                                             [s.name for s in self.shots])
         self._preview_worker.found.connect(self._on_preview_found)
         self._preview_worker.start()
 

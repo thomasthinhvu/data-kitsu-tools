@@ -89,6 +89,10 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-19]
+  - **Version 1.20:** the shot names are matched with a naming database built from the Kitsu CSV files. The rules: the reel tag (R1, R2...) is optional, leading zeros do not matter (`010` = `10`), but `050` and `0050` are kept apart when both exist, letters (`01A`, `01_A`), decimals (`0043.5`) and hyphen variants (`010-add02`) are recognised, and when several shots fit a folder the longest name wins (`_PL01` beats the plain shot). A folder with no reel tag only matches when that shot number is unique in the CSV.
+  - **Seq column:** the SHOTS LIST has a **SEQ** column between NO and NAME, filled from the CSV *Sequence* column. A Name that is only a number (`010`) takes the Sequence as prefix (`R1_SC03` -> `R1_SC03_010`).
+  - **Frames:** the CSV *Frames* column can also be named *FRAME*. A CSV without a Frames column is accepted: the FRAMES cell shows `?` and any file count is accepted.
+  - **Path history:** clicking COPY FROM or PASTE TO opens the recent-path list at once, like Explorer's address bar. Typing filters the list, Esc closes it. The ▾ button does the same.
   - **Version 1.19:** the automatic update check on launch is removed. The launchers now only check Python and PySide6.
   - **Update check:** the INFO window has a *Check for update* button. It compares with the version on GitHub and can update the app files. Restart the app after an update.
   - **Change log:** the INFO window has two tabs: *About me* (contacts, donation QR, wallet and update check) and *Change log* (this section of README.md).

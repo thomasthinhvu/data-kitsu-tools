@@ -9,7 +9,8 @@ def build(root: Path, csv_path: Path):
     for n, s in enumerate(shots[:14]):
         seq = s.name.split("_")[1]                          # e.g. SC01
         reel = "REEL_" + s.name.split("_")[0]
-        frames = s.frames if n % 5 else max(1, s.frames - 3)   # some shots will mismatch
+        base = s.frames or 10                                  # CSV without Frames: demo uses 10
+        frames = base if n % 5 else max(1, base - 3)           # some shots will mismatch
         if n % 4 == 1:                                        # PL01 + PL02 variants
             for pl in ("PL01", "PL02"):
                 d = root / "FILM" / reel / seq / f"{s.name}_{pl}"

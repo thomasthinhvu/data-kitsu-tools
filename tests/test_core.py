@@ -113,8 +113,61 @@ def run_tests():
     shots = dkt.load_csv(csv_path)
     assert [(s.name, s.frames) for s in shots] == [("HHCC_SC13_010", 57), ("HHCC_SC13_0100", 31)], shots
 
+    test_naming_rules()
     test_reel_tag_and_publish()
     print("ALL CORE TESTS PASSED")
+
+
+def test_naming_rules():
+    """Naming database rules: reel tag, zeros, letters, decimals, hyphen variants, longest match."""
+    names = ["HHCC_SC07_010", "HHCC_SC07_010_PL01"]
+    assert dkt.ShotIndex(names).match_folder("HHCC_SC07_010_PL01_v02") == ["HHCC_SC07_010_PL01"]
+    assert dkt.ShotIndex(names).match_folder("HHCC_SC07_010_PL02") == ["HHCC_SC07_010"]
+    assert dkt.ShotIndex(names).match_folder("HHCC_SC07_0100") == []
+    # letters: CT_R1_01A is a different shot from CT_R1_01, and CT_R4_01_A is the same as CT_R1_01A
+    assert dkt.folder_matches("CT_R4_01_A_PL01", "CT_R1_01A")
+    assert not dkt.folder_matches("CT_R1_01A", "CT_R1_01")
+    assert not dkt.folder_matches("CT_R1_01_B", "CT_R1_01A")
+    # decimals
+    assert dkt.folder_matches("MAXO_R1_0043.5_v02", "MAXO_R1_0043.5")
+    assert not dkt.folder_matches("MAXO_R1_0043.5", "MAXO_R1_0043")
+    # hyphen variants: 010-add02 is its own shot, 010 alone must not take it
+    hy = dkt.ShotIndex(["R1_SC03_010", "R1_SC03_010-add02"])
+    assert hy.match_folder("R1_SC03_010-add02") == ["R1_SC03_010-add02"]
+    assert hy.match_folder("R1_SC03_010") == ["R1_SC03_010"]
+    # unpadded numbers
+    assert dkt.folder_matches("THO_R1_100_PL02", "THO_R1_0100") is True
+    # labels for the Version column
+    assert dkt.unit_label(Path("HHCC_SC07_010-add02")) == "add02"
+    assert dkt.unit_label(Path("HHCC_SC07_010_PL02")) == "PL02"
+    assert dkt.unit_label(Path("HHCC_SC07_010_Tom_comp_v03")) == "v03"
+    # frames missing: no mismatch colour, count still shown
+    assert dkt.unit_style(3, None) == {}
+    assert dkt.frames_text(None) == "?"
+
+    tmp = Path(tempfile.mkdtemp())
+    csv_path = tmp / "a_o.csv"
+    csv_path.write_text('"Sequence";"Name";"Description"\n"R1_SC03";"010";""\n'
+                        '"R1_SC03";"010-add02";""\n"SKIN_R3";"R3_skin_01";""\n',
+                        encoding="utf-8")
+    shots = dkt.load_csv(csv_path)
+    assert [(s.name, s.seq, s.frames) for s in shots] == [
+        ("R1_SC03_010", "R1_SC03", None),
+        ("R1_SC03_010-add02", "R1_SC03", None),
+        ("R3_skin_01", "SKIN_R3", None)], shots
+
+    csv2 = tmp / "chuyen_tinh.csv"
+    csv2.write_text('"Sequence";"Name";"FRAME"\n"REEL01";"CT_R1_01A";"26"\n', encoding="utf-8")
+    shots2 = dkt.load_csv(csv2)
+    assert [(s.name, s.seq, s.frames) for s in shots2] == [("CT_R1_01A", "REEL01", 26)]
+
+    # find_first_folder respects the longest-match rule when all shots are passed
+    src = tmp / "src"
+    make(src / "R1_SC07/HHCC_SC07_010_PL01", 2)
+    make(src / "R1_SC07/HHCC_SC07_010", 2)
+    got = dkt.find_first_folder(src, "HHCC_SC07_010", names)
+    assert got is not None and got.name == "HHCC_SC07_010", got
+    assert dkt.find_first_folder(src, "HHCC_SC07_010", ["HHCC_SC07_010"]) is not None
 
 
 def test_reel_tag_and_publish():

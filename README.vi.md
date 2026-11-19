@@ -97,6 +97,10 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-19]
+  - **Version 1.20:** việc khớp tên shot dùng một cơ sở dữ liệu tên được rút ra từ các file CSV của Kitsu. Quy tắc: số reel (R1, R2...) là tùy chọn, số 0 đứng đầu không quan trọng (`010` = `10`) nhưng `050` và `0050` được tách riêng khi cả hai cùng tồn tại, nhận diện được chữ cái (`01A`, `01_A`), số thập phân (`0043.5`) và biến thể dấu gạch ngang (`010-add02`), và khi nhiều shot khớp với một thư mục thì tên dài nhất thắng (`_PL01` thắng shot gốc). Thư mục không có số reel chỉ khớp khi số shot đó là duy nhất trong CSV.
+  - **Cột Seq:** SHOTS LIST có cột **SEQ** nằm giữa NO và NAME, lấy từ cột *Sequence* của CSV. Tên chỉ là số (`010`) sẽ lấy Sequence làm tiền tố (`R1_SC03` -> `R1_SC03_010`).
+  - **Frames:** cột *Frames* của CSV cũng nhận tên *FRAME*. CSV không có cột Frames vẫn được nhận: ô FRAMES hiện `?` và mọi số file đều được chấp nhận.
+  - **Lịch sử đường dẫn:** bấm vào ô COPY FROM hoặc PASTE TO sẽ mở danh sách đường dẫn gần đây ngay, giống thanh địa chỉ của Explorer. Gõ để lọc danh sách, Esc để đóng. Nút ▾ làm việc tương tự.
   - **Version 1.19:** bỏ kiểm tra cập nhật tự động khi mở app. Launcher giờ chỉ kiểm tra Python và PySide6.
   - **Kiểm tra cập nhật:** cửa sổ INFO có nút *Check for update*. Nút này so sánh với phiên bản trên GitHub và có thể cập nhật file của app. Khởi động lại app sau khi cập nhật.
   - **Change log:** cửa sổ INFO có hai tab: *About me* (liên hệ, mã QR donate, ví và kiểm tra cập nhật) và *Change log* (phần này trong README.md).
