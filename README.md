@@ -89,6 +89,7 @@ python3 data_kitsu_tools.py
 ## My Modification update
 
 - [26-11-19]
+  - **Version 1.23:** each row of the recent-path list turns blue while the mouse is over it.
   - **Version 1.22:** the ▾ buttons next to the COPY FROM and PASTE TO "..." buttons are removed. The recent-path list opens by clicking the field. A path box is highlighted in blue while a folder is dragged over it.
   - **Version 1.21:** **CLEAR** also clears the log view. The confirmation asks for both the shot list and the log, or only the log when the list is empty. The app log file on disk is not touched.
   - **Version 1.20:** the shot names are matched with a naming database built from the Kitsu CSV files. The rules: the reel tag (R1, R2...) is optional, leading zeros do not matter (`010` = `10`), but `050` and `0050` are kept apart when both exist, letters (`01A`, `01_A`), decimals (`0043.5`) and hyphen variants (`010-add02`) are recognised, and when several shots fit a folder the longest name wins (`_PL01` beats the plain shot). A folder with no reel tag only matches when that shot number is unique in the CSV.

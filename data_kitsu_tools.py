@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.22"
+APP_VERSION = "1.23"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -842,6 +842,13 @@ class PathEdit(QLineEdit):
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.activated[str].connect(self._on_history_picked)
         self.setCompleter(self._completer)
+        # Rows of the history list light up under the mouse
+        popup = self._completer.popup()
+        popup.setMouseTracking(True)
+        popup.viewport().setMouseTracking(True)
+        popup.setStyleSheet(
+            "QListView::item:hover, QListView::item:selected {"
+            " background-color: #3b82f6; color: white; }")
 
     def set_history(self, paths):
         self._history.setStringList(list(paths))
