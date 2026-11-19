@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -1805,18 +1805,24 @@ class MainWindow(QMainWindow):
         self._update_previews()
 
     def clear_shots(self):
-        if self._busy() or not self.shots:
+        """CLEAR: empty the shot list and the log view (the app log file is kept)."""
+        if self._busy():
             return
-        answer = QMessageBox.question(self, APP_NAME, "Clear the whole shot list?")
+        has_log = bool(self.log_view.toPlainText().strip())
+        if not self.shots and not has_log:
+            return
+        question = "Clear the whole shot list and the log?" if self.shots else "Clear the log?"
+        answer = QMessageBox.question(self, APP_NAME, question)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.shots = []
-        self.scan_config = None
-        self.current_mode = MODE_LOCAL
-        self._expanded.clear()
-        self.log("Shot list cleared.")
-        self.refresh_tree()
-        self._update_previews()
+        self.log_view.clear()
+        if self.shots:
+            self.shots = []
+            self.scan_config = None
+            self.current_mode = MODE_LOCAL
+            self._expanded.clear()
+            self.refresh_tree()
+            self._update_previews()
 
     def _sample_io(self):
         """Once a second: transfer rate (MB/s) and active time (%) from the copy threads."""
