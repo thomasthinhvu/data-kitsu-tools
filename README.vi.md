@@ -96,6 +96,10 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-19]
+  - **Version 1.19:** bỏ kiểm tra cập nhật tự động khi mở app. Launcher giờ chỉ kiểm tra Python và PySide6.
+  - **Kiểm tra cập nhật:** cửa sổ INFO có nút *Check for update*. Nút này so sánh với phiên bản trên GitHub và có thể cập nhật file của app. Khởi động lại app sau khi cập nhật.
+  - **Change log:** cửa sổ INFO có hai tab: *About me* (liên hệ, mã QR donate, ví và kiểm tra cập nhật) và *Change log* (phần này trong README.md).
 - [26-11-18]
   - **Version 1.18:** dữ liệu lưu (log, lịch sử, thư mục run) được ghi vào thư mục `run_logs/` trong dự án để dễ dọn dẹp (thư mục này được git bỏ qua). Nếu không ghi được vào đó thì dùng thư mục dữ liệu riêng của người dùng.
   - **Version 1.17:** app tự lưu dữ liệu để phân tích sau (nút *Open log folder* trong cửa sổ INFO): `logs/app.log` (mọi dòng log, tự xoay vòng), `history.csv` (mỗi lượt chạy một dòng: thời gian, tốc độ, số luồng, lỗi, buffer, đường dẫn), và `runs/<giờ>/` gồm `samples.csv` (mỗi giây: MB/s, active time, số file, số luồng), `files.csv` (từng file: dung lượng, thời gian, MB/s, kết quả, lỗi) và `summary.json`. Giữ 100 thư mục run gần nhất.
@@ -124,4 +128,4 @@ python3 data_kitsu_tools.py
 
 ## Cập nhật
 
-Khi có bản mới trên GitHub, launcher hiện thông báo *UPDATE AVAILABLE*. Trả lời `y` để cập nhật. Launcher sẽ cài các thư viện mới (nếu có) rồi mở phiên bản mới.
+Mở **INFO** và bấm **Check for update**. Nếu có bản mới trên GitHub, bấm **Update now** rồi khởi động lại app. Launcher không còn kiểm tra cập nhật khi khởi động.

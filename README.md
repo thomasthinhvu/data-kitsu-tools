@@ -88,6 +88,10 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-19]
+  - **Version 1.19:** the automatic update check on launch is removed. The launchers now only check Python and PySide6.
+  - **Update check:** the INFO window has a *Check for update* button. It compares with the version on GitHub and can update the app files. Restart the app after an update.
+  - **Change log:** the INFO window has two tabs: *About me* (contacts, donation QR, wallet and update check) and *Change log* (this section of README.md).
 - [26-11-18]
   - **Version 1.18:** the run records and app log go to the `run_logs/` folder inside the project, so they are easy to clean up (the folder is git-ignored). If that folder cannot be written, they go to the per-user data folder instead.
   - **Version 1.17:** the app keeps records for later analysis, in its data folder (*Open log folder* in the INFO window): `logs/app.log` (every log line, rotating), `history.csv` (one line per run: duration, speed, threads, errors, buffer size, paths), and `runs/<time>/` with `samples.csv` (every second: MB/s, active time, files, threads), `files.csv` (every file: size, seconds, MB/s, result, error) and `summary.json`. The last 100 run folders are kept.
@@ -115,4 +119,4 @@ python3 data_kitsu_tools.py
 
 ## Updating
 
-When a newer version is on GitHub, the launcher shows an *UPDATE AVAILABLE* notice. Answer `y` to update. The launcher then installs any new requirements and starts the new version.
+Open **INFO** and press **Check for update**. If a newer version is on GitHub, press **Update now**, then restart the app. The launchers no longer check for updates when they start.

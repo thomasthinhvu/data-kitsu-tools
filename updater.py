@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Update checker for Data Kitsu Tools.
 
-Called by the launchers (run.sh, run.command, run.cmd) before the GUI starts.
+Used by the INFO window (Check for update) and runnable from a terminal.
 It compares the local VERSION file with the one on GitHub and, when a newer
-version exists, asks whether to update. Standard library only.
+version exists, can update the app. Standard library only.
 
 Usage:
     python updater.py            # check and ask before updating

@@ -36,6 +36,8 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QP
                           QTextCharFormat,
                           QPixmap, QPolygonF, QTextCursor)
 from PySide6.QtWidgets import QFrame
+from PySide6.QtWidgets import QTabWidget, QTextBrowser
+import updater  # stdlib helper next to this file: GitHub version check and update
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -45,7 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.18"
+APP_VERSION = "1.19"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -1038,13 +1040,52 @@ def brand_icon(kind: str, size: int = 36) -> QIcon:
     return QIcon(pix)
 
 
+def read_changelog() -> str:
+    """Return the 'My Modification update' section of README.md, shown as the change log."""
+    readme = Path(__file__).resolve().parent / "README.md"
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except OSError:
+        return "The change log could not be read (README.md is missing)."
+    match = re.search(r"^## My Modification update[ \t]*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return match.group(1).strip() if match else "No change log found in README.md."
+
+
+class UpdateWorker(QThread):
+    """Runs the GitHub version check or the update in the background, so the window stays responsive."""
+
+    checked = Signal(object)  # latest version string, or None when GitHub cannot be reached
+    updated = Signal(bool)    # True when the update succeeded
+
+    def __init__(self, action: str, latest: str | None = None, parent=None):
+        super().__init__(parent)
+        self._action = action
+        self._latest = latest
+
+    def run(self):
+        if self._action == "check":
+            self.checked.emit(updater.fetch_latest_version())
+        else:
+            self.updated.emit(updater.do_update(self._latest))
+
+
 class AboutDialog(QDialog):
-    """About window: author name, contact links with icons, and the donation QR code."""
+    """Info window with two tabs: About me (contacts, donation, update check) and Change log."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("About")
-        layout = QVBoxLayout(self)
+        self.setWindowTitle("Info")
+        self._latest = None  # newer version found on GitHub, waiting for "Update now"
+        self._worker = None  # running UpdateWorker, kept alive until it finishes
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        tabs = QTabWidget()
+        outer.addWidget(tabs)
+
+        # Tab 1: About me
+        about_page = QWidget()
+        layout = QVBoxLayout(about_page)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(10)
 
@@ -1106,6 +1147,25 @@ class AboutDialog(QDialog):
         wallet_row.addWidget(copy_button)
         layout.addLayout(wallet_row)
 
+        layout.addSpacing(10)
+        update_row = QHBoxLayout()
+        self.update_status = QLabel(f"Current version: {APP_VERSION}")
+        self.update_status.setWordWrap(True)
+        self.update_button = QPushButton("Check for update")
+        self.update_button.setMinimumWidth(160)
+        self.update_button.clicked.connect(self._on_update_button)
+        update_row.addWidget(self.update_status, 1)
+        update_row.addWidget(self.update_button)
+        layout.addLayout(update_row)
+        layout.addStretch(1)
+        tabs.addTab(about_page, "About me")
+
+        # Tab 2: Change log (the README section, rendered as Markdown)
+        changelog = QTextBrowser()
+        changelog.setOpenExternalLinks(True)
+        changelog.setMarkdown(read_changelog())
+        tabs.addTab(changelog, "Change log")
+
         bottom = QHBoxLayout()
         logs = QPushButton("Open log folder")
         logs.clicked.connect(self._open_logs)
@@ -1114,7 +1174,50 @@ class AboutDialog(QDialog):
         bottom.addWidget(logs)
         bottom.addStretch(1)
         bottom.addWidget(close)
-        layout.addLayout(bottom)
+        outer.addLayout(bottom)
+
+    def done(self, result):
+        # Do not close while a background check or update is still running.
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait()
+        super().done(result)
+
+    def _on_update_button(self):
+        if self._latest:
+            answer = QMessageBox.question(
+                self, APP_NAME,
+                f"Update to version {self._latest}?\nRestart the app after the update finishes.")
+            if answer == QMessageBox.StandardButton.Yes:
+                self._run_worker("update")
+        else:
+            self._run_worker("check")
+
+    def _run_worker(self, action: str):
+        self.update_button.setEnabled(False)
+        self.update_status.setText("Checking GitHub..." if action == "check" else "Updating...")
+        self._worker = UpdateWorker(action, self._latest, self)
+        self._worker.checked.connect(self._on_checked)
+        self._worker.updated.connect(self._on_updated)
+        self._worker.start()
+
+    def _on_checked(self, latest):
+        self.update_button.setEnabled(True)
+        if latest is None:
+            self.update_status.setText("Cannot reach GitHub. Check your connection and try again.")
+        elif updater.parse_version(latest) <= updater.parse_version(APP_VERSION):
+            self.update_status.setText(f"You have the latest version ({APP_VERSION}).")
+        else:
+            self._latest = latest
+            self.update_status.setText(f"Version {latest} is available (you have {APP_VERSION}).")
+            self.update_button.setText("Update now")
+
+    def _on_updated(self, ok: bool):
+        if ok:
+            self.update_status.setText(f"Updated to {self._latest}. Restart Data Kitsu Tools to use it.")
+            self.update_button.setText("Updated")  # stays disabled
+        else:
+            self.update_status.setText("Update failed. Check your connection, or update manually from GitHub.")
+            self.update_button.setEnabled(True)
 
     @staticmethod
     def _open_logs():
