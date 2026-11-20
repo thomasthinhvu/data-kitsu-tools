@@ -308,8 +308,24 @@ def read_excel_rows(path: Path) -> list[list[str]]:
         return rows
 
 
+def _prepare_ocr_image(src: Path, dst: Path) -> Path:
+    """Normalize pixel format and upscale small screenshots for better OCR."""
+    img = QImage(str(src))
+    if img.isNull():
+        return src
+    if img.width() < 1000:
+        img = img.scaledToWidth(img.width() * 2, Qt.TransformationMode.SmoothTransformation)
+    elif img.width() > 3800:
+        img = img.scaledToWidth(3800, Qt.TransformationMode.SmoothTransformation)
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    if img.save(str(dst), "PNG"):
+        return dst
+    return src
+
+
 def extract_text_from_image(path: Path) -> str:
     """Extract text from a PNG/JPG image using Windows OCR or Tesseract."""
+    last_err = ""
     if os.name == "nt":
         ps_script = (
             "$ErrorActionPreference = 'Stop'\n"
@@ -324,34 +340,40 @@ def extract_text_from_image(path: Path) -> str:
             "[Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime] | Out-Null\n"
             "[Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime] | Out-Null\n"
             "[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null\n"
-            f"$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('{str(path.resolve())}')) ([Windows.Storage.StorageFile])\n"
+            "[Windows.Globalization.Language, Windows.Foundation, ContentType=WindowsRuntime] | Out-Null\n"
+            "$imgPath = $env:DKT_OCR_IMG\n"
+            "$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])\n"
             "$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\n"
             "$dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\n"
             "$bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\n"
             "$ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()\n"
+            "if ($null -eq $ocr) { $ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) }\n"
+            "if ($null -eq $ocr) { "
+            "$langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages; "
+            "if ($langs.Count -gt 0) { $ocr = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($langs[0]) } "
+            "}\n"
+            "if ($null -eq $ocr) { throw 'No Windows OCR language pack installed.' }\n"
             "$res = Await ($ocr.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\n"
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
             "$res.Lines | ForEach-Object { $_.Text }\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8") as tf:
-            tf.write(ps_script)
-            ps_path = tf.name
-        try:
+        with tempfile.TemporaryDirectory(prefix="dkt_ocr_") as td:
+            norm_img = _prepare_ocr_image(path.resolve(), Path(td) / "ocr_input.png")
+            ps_path = Path(td) / "run_ocr.ps1"
+            ps_path.write_text(ps_script, encoding="utf-8")
+            env = dict(os.environ, DKT_OCR_IMG=str(norm_img.resolve()))
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_path],
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_path)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                env=env,
                 timeout=30,
                 check=False,
             )
-            if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout
-        finally:
-            try:
-                os.remove(ps_path)
-            except OSError:
-                pass
+            if proc.returncode == 0:
+                return proc.stdout or ""
+            last_err = (proc.stderr or proc.stdout or "").strip()
 
     tesseract = shutil.which("tesseract")
     if tesseract:
@@ -364,5 +386,8 @@ def extract_text_from_image(path: Path) -> str:
             check=False,
         )
         if proc.returncode == 0:
-            return proc.stdout
-    raise RuntimeError("Could not run OCR on image (Windows OCR or Tesseract required).")
+            return proc.stdout or ""
+        last_err = (proc.stderr or "").strip()
+
+    detail = f": {last_err}" if last_err else " (Windows OCR or Tesseract required)."
+    raise RuntimeError(f"Could not run OCR on image{detail}")
