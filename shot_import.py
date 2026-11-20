@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Shot-list import helpers (Excel .xlsx/.xlsm, Image OCR .png/.jpg, smart naming)
-and first-frame JPEG capture for Data Kitsu Tools 2.0.
+Shot-list import helpers (Excel .xlsx/.xlsm, Image OCR .png/.jpg with 2D table
+reconstruction, smart column inference, and first-frame JPEG capture) for
+Data Kitsu Tools 2.0.
 """
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -19,13 +22,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
 SHOT_HEADER_ALIASES = {
-    "name", "shot", "shot code", "shot_code", "shotname", "shot name",
+    "name", "shot", "shot code", "shot_code", "shotcode", "shotname", "shot name",
     "shot_name", "vfx_name", "vfx name", "code",
 }
 SEQ_HEADER_ALIASES = {"sequence", "seq", "scene", "phase", "reel", "episode", "ep"}
-FRAME_HEADER_ALIASES = {"frames", "frame", "frame count", "frame_count", "duration", "dur", "length"}
-START_FRAME_ALIASES = {"start frame", "start_frame", "frame_in", "frame in", "in", "start"}
-END_FRAME_ALIASES = {"end frame", "end_frame", "frame_out", "frame out", "out", "end"}
+FRAME_HEADER_ALIASES = {
+    "frames", "frame", "frame count", "frame_count", "duration", "dur", "length",
+    "cut duration", "cut_duration",
+}
+START_FRAME_ALIASES = {"start frame", "start_frame", "frame_in", "frame in", "cut in", "cut_in", "in", "start"}
+END_FRAME_ALIASES = {"end frame", "end_frame", "frame_out", "frame out", "cut out", "cut_out", "out", "end"}
 
 RANGE_RE = re.compile(r"^\s*(\d+)\s*[-–—]\s*(\d+)\s*$")
 SCENE_HEADER_RE = re.compile(
@@ -33,11 +39,22 @@ SCENE_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 GENERIC_SHOT_RE = re.compile(r"^(?:shot[_\-\s]*\d+|\d+(?:[._\-][a-zA-Z0-9]+)?)$", re.IGNORECASE)
+SHOT_CELL_RE = re.compile(
+    r"^(?:"
+    r"[a-zA-Z]{2,12}_\d{2,5}(?:_\d{2,5})?"          # BES_010, bunny_010_0010, HHCC_010
+    r"|\d{2,4}_[a-zA-Z][a-zA-Z0-9]{1,15}_\d{2,5}"   # 005_MAMMOTH_0020
+    r"|[a-zA-Z]{2,8}_[a-zA-Z0-9]{1,8}_[a-zA-Z0-9]{1,8}(?:_\d{2,5})?"  # HHCC_SC01_010
+    r"|[a-zA-Z]{1,5}\d{2,5}(?:[._\-]\d{2,4})?"      # MK8010, SH010
+    r"|(?:shot|sh)[_\-\s]?\d{1,5}[a-zA-Z]?"         # shot_01, Shot_001
+    r")$",
+    re.IGNORECASE,
+)
 OCR_SHOT_TOKEN_RE = re.compile(
     r"\b(?:"
-    r"\d{2,4}[_\-\s][A-Z][A-Z0-9]{1,15}[_\-\s]\d{2,5}(?:[._\-][a-zA-Z0-9]+)*"
-    r"|[A-Z]{2,8}[_\-][A-Z0-9]{1,8}[_\-][A-Z0-9]{1,8}(?:[_\-]\d{2,5})?(?:[._\-][a-zA-Z0-9]+)*"
-    r"|[A-Z]{1,5}\d{2,5}(?:[._\-]\d{2,4})?"
+    r"\d{2,4}[_\-\s][a-zA-Z][a-zA-Z0-9]{1,15}[_\-\s]\d{2,5}(?:[._\-][a-zA-Z0-9]+)*"
+    r"|[a-zA-Z]{2,12}[_\-]\d{2,5}(?:[_\-]\d{2,5})?(?:[._\-][a-zA-Z0-9]+)*"
+    r"|[a-zA-Z]{2,8}[_\-][a-zA-Z0-9]{1,8}[_\-][a-zA-Z0-9]{1,8}(?:[_\-]\d{2,5})?(?:[._\-][a-zA-Z0-9]+)*"
+    r"|[a-zA-Z]{1,5}\d{2,5}(?:[._\-]\d{2,4})?"
     r"|(?:shot|sh)[_\-\s]?\d{1,5}[a-zA-Z]?"
     r")\b",
     re.IGNORECASE,
@@ -60,11 +77,7 @@ def _find_ffmpeg() -> str | None:
 
 
 def capture_first_frame_jpg(files: list[Path], out_path: Path) -> Path | None:
-    """Convert the first frame of *files* to a JPEG at *out_path*.
-
-    Uses Qt ``QImage`` for standard image formats and falls back to ``ffmpeg``
-    for EXR / DPX / MOV sequences. Returns *out_path* on success, else ``None``.
-    """
+    """Convert the first frame of *files* to a JPEG at *out_path*."""
     if not files:
         return None
     candidates = sorted((Path(f) for f in files), key=lambda p: p.name.lower())
@@ -135,55 +148,111 @@ def _clean_shot_token(name: str, current_seq: str) -> str:
     return name
 
 
-def parse_shots_from_table(rows: list[list[str]]) -> list[dict]:
-    """Extract shot dicts (name, frames, seq) from 2D table rows (Excel/CSV)."""
-    if not rows:
-        return []
+def detect_table_columns(rows: list[list[str]]) -> dict:
+    """Infer Shot Name, Sequence, Frames, Start/End columns from a 2D table.
 
-    header_idx = None
-    col_map: dict[str, int] = {}
+    Returns ``confident=True`` when a clear header or high-confidence shot column
+    is found; otherwise ``confident=False`` so the UI can ask the user.
+    """
+    if not rows:
+        return {"confident": False, "header_row": None, "name_col": -1, "seq_col": -1,
+                "frames_col": -1, "start_col": -1, "end_col": -1}
+
     for idx, row in enumerate(rows[:20]):
         lowered = [str(c or "").strip().lower() for c in row]
         name_col = next((i for i, h in enumerate(lowered) if h in SHOT_HEADER_ALIASES), None)
         if name_col is not None:
-            header_idx = idx
-            col_map["name"] = name_col
-            col_map["seq"] = next((i for i, h in enumerate(lowered) if h in SEQ_HEADER_ALIASES), -1)
-            col_map["frames"] = next(
+            seq_col = next((i for i, h in enumerate(lowered) if h in SEQ_HEADER_ALIASES), -1)
+            frames_col = next(
                 (i for i, h in enumerate(lowered) if h in FRAME_HEADER_ALIASES or h.startswith("duration")),
                 -1,
             )
-            col_map["start"] = next((i for i, h in enumerate(lowered) if h in START_FRAME_ALIASES), -1)
-            col_map["end"] = next((i for i, h in enumerate(lowered) if h in END_FRAME_ALIASES), -1)
-            break
+            start_col = next((i for i, h in enumerate(lowered) if h in START_FRAME_ALIASES), -1)
+            end_col = next((i for i, h in enumerate(lowered) if h in END_FRAME_ALIASES), -1)
+            return {
+                "confident": True,
+                "header_row": idx,
+                "name_col": name_col,
+                "seq_col": seq_col,
+                "frames_col": frames_col,
+                "start_col": start_col,
+                "end_col": end_col,
+            }
 
-    if header_idx is None:
-        # Fallback: treat non-empty rows as free text
-        return parse_shots_from_text("\n".join(" ".join(str(c) for c in r if c) for r in rows))
+    # No exact header match: score columns heuristically by cell content
+    num_cols = max((len(r) for r in rows), default=0)
+    best_name_col, best_name_score = -1, 0
+    best_frame_col, best_frame_score = -1, 0
+    for c in range(num_cols):
+        shot_hits = 0
+        frame_hits = 0
+        for r in rows:
+            val = str(r[c]).strip() if c < len(r) else ""
+            if not val:
+                continue
+            if SHOT_CELL_RE.match(val):
+                shot_hits += 1
+            elif parse_frame_value(val) is not None and (RANGE_RE.match(val) or val.isdigit()):
+                if val.isdigit() and int(val) > 5:
+                    frame_hits += 1
+                elif RANGE_RE.match(val):
+                    frame_hits += 2
+        if shot_hits > best_name_score:
+            best_name_col, best_name_score = c, shot_hits
+        if frame_hits > best_frame_score:
+            best_frame_col, best_frame_score = c, frame_hits
 
-    def cell(row: list[str], key: str) -> str:
-        cidx = col_map.get(key, -1)
+    return {
+        "confident": best_name_score >= 3,
+        "header_row": None,
+        "name_col": best_name_col,
+        "seq_col": -1,
+        "frames_col": best_frame_col if best_frame_col != best_name_col else -1,
+        "start_col": -1,
+        "end_col": -1,
+    }
+
+
+def extract_shots_from_table_with_mapping(
+    rows: list[list[str]],
+    name_col: int,
+    seq_col: int = -1,
+    frames_col: int = -1,
+    start_col: int = -1,
+    end_col: int = -1,
+    header_row: int | None = 0,
+) -> list[dict]:
+    """Extract shot dicts from *rows* using explicit column indices."""
+    if not rows or name_col < 0:
+        return []
+
+    start_idx = (header_row + 1) if header_row is not None else 0
+
+    def cell(row: list[str], cidx: int) -> str:
         return str(row[cidx]).strip() if 0 <= cidx < len(row) else ""
 
     records: list[dict] = []
     seen: set[str] = set()
     current_seq = ""
 
-    for row in rows[header_idx + 1 :]:
-        raw_name = cell(row, "name")
+    for row in rows[start_idx:]:
+        raw_name = cell(row, name_col)
         if not raw_name:
             continue
-        seq_val = cell(row, "seq")
+        low_name = raw_name.lower()
+        if low_name in SHOT_HEADER_ALIASES:
+            continue
+
+        seq_val = cell(row, seq_col)
         if seq_val and not seq_val.isdigit():
             current_seq = seq_val
         elif seq_val and seq_val.isdigit():
             seq_val = f"R{seq_val}"
 
-        # Detect section headers like "Scene 001 - ESTB belfast" or "phase 6"
-        frames = parse_frame_value(cell(row, "frames"))
-        if frames is None and col_map["start"] >= 0 and col_map["end"] >= 0:
-            s_val = parse_frame_value(cell(row, "start"))
-            e_val = parse_frame_value(cell(row, "end"))
+        frames = parse_frame_value(cell(row, frames_col)) if frames_col >= 0 else None
+        if frames is None and start_col >= 0 and end_col >= 0:
+            s_val = parse_frame_value(cell(row, start_col))
+            e_val = parse_frame_value(cell(row, end_col))
             if s_val is not None and e_val is not None and e_val >= s_val:
                 frames = e_val - s_val + 1
 
@@ -198,6 +267,24 @@ def parse_shots_from_table(rows: list[list[str]]) -> list[dict]:
         seen.add(name)
         records.append({"name": name, "frames": frames, "seq": seq})
     return records
+
+
+def parse_shots_from_table(rows: list[list[str]]) -> list[dict]:
+    """Extract shot dicts (name, frames, seq) from 2D table rows (Excel/CSV)."""
+    if not rows:
+        return []
+    info = detect_table_columns(rows)
+    if info["name_col"] >= 0:
+        return extract_shots_from_table_with_mapping(
+            rows,
+            name_col=info["name_col"],
+            seq_col=info["seq_col"],
+            frames_col=info["frames_col"],
+            start_col=info["start_col"],
+            end_col=info["end_col"],
+            header_row=info["header_row"],
+        )
+    return parse_shots_from_text("\n".join(" ".join(str(c) for c in r if c) for r in rows))
 
 
 def parse_shots_from_text(text: str) -> list[dict]:
@@ -313,7 +400,7 @@ def _prepare_ocr_image(src: Path, dst: Path) -> Path:
     img = QImage(str(src))
     if img.isNull():
         return src
-    if img.width() < 1000:
+    if img.width() < 1200:
         img = img.scaledToWidth(img.width() * 2, Qt.TransformationMode.SmoothTransformation)
     elif img.width() > 3800:
         img = img.scaledToWidth(3800, Qt.TransformationMode.SmoothTransformation)
@@ -323,8 +410,75 @@ def _prepare_ocr_image(src: Path, dst: Path) -> Path:
     return src
 
 
-def extract_text_from_image(path: Path) -> str:
-    """Extract text from a PNG/JPG image using Windows OCR or Tesseract."""
+def reconstruct_table_from_words(words: list[dict]) -> list[list[str]]:
+    """Reconstruct 2D table rows/columns from OCR word bounding boxes."""
+    if not words:
+        return []
+
+    heights = [float(w.get("h") or 12.0) for w in words if float(w.get("h") or 0) > 0]
+    med_h = statistics.median(heights) if heights else 14.0
+    row_tol = max(6.0, med_h * 0.65)
+    cell_gap = max(8.0, med_h * 1.15)
+    col_tol = max(18.0, med_h * 2.2)
+
+    sorted_words = sorted(words, key=lambda w: (float(w["y"]) + float(w["h"]) * 0.5, float(w["x"])))
+    row_groups: list[list[dict]] = []
+    for w in sorted_words:
+        yc = float(w["y"]) + float(w["h"]) * 0.5
+        if not row_groups:
+            row_groups.append([w])
+            continue
+        last_yc = statistics.mean(float(it["y"]) + float(it["h"]) * 0.5 for it in row_groups[-1])
+        if abs(yc - last_yc) <= row_tol:
+            row_groups[-1].append(w)
+        else:
+            row_groups.append([w])
+
+    # Merge adjacent words in each row into cells
+    row_cells: list[list[tuple[float, str]]] = []
+    all_x: list[float] = []
+    for rg in row_groups:
+        rg.sort(key=lambda w: float(w["x"]))
+        cells: list[tuple[float, float, str]] = []  # (x_start, x_end, text)
+        for w in rg:
+            wx, ww, txt = float(w["x"]), float(w["w"]), str(w["text"]).strip()
+            if not txt:
+                continue
+            if cells and (wx - cells[-1][1]) <= cell_gap:
+                prev_x, _prev_end, prev_txt = cells[-1]
+                cells[-1] = (prev_x, wx + ww, f"{prev_txt} {txt}")
+            else:
+                cells.append((wx, wx + ww, txt))
+        if cells:
+            row_cells.append([(cx, ctxt) for cx, _ce, ctxt in cells])
+            all_x.extend(cx for cx, _ce, _ctxt in cells)
+
+    if not row_cells:
+        return []
+
+    # Cluster cell X positions into column anchors
+    all_x.sort()
+    col_anchors: list[float] = []
+    for x in all_x:
+        if not col_anchors or abs(x - col_anchors[-1]) > col_tol:
+            col_anchors.append(x)
+        else:
+            col_anchors[-1] = (col_anchors[-1] + x) * 0.5
+
+    table: list[list[str]] = []
+    num_cols = len(col_anchors)
+    for cells in row_cells:
+        row_out = [""] * num_cols
+        for cx, ctxt in cells:
+            best_c = min(range(num_cols), key=lambda c: abs(cx - col_anchors[c]))
+            row_out[best_c] = f"{row_out[best_c]} {ctxt}".strip() if row_out[best_c] else ctxt
+        if any(row_out):
+            table.append(row_out)
+    return table
+
+
+def extract_ocr_data_from_image(path: Path) -> tuple[str, list[list[str]]]:
+    """Extract both plain text and reconstructed 2D table from a PNG/JPG image."""
     last_err = ""
     if os.name == "nt":
         ps_script = (
@@ -354,8 +508,15 @@ def extract_text_from_image(path: Path) -> str:
             "}\n"
             "if ($null -eq $ocr) { throw 'No Windows OCR language pack installed.' }\n"
             "$res = Await ($ocr.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])\n"
+            "$words = @()\n"
+            "foreach ($line in $res.Lines) {\n"
+            "  foreach ($w in $line.Words) {\n"
+            "    $r = $w.BoundingRect\n"
+            "    $words += [PSCustomObject]@{ text=$w.Text; x=$r.X; y=$r.Y; w=$r.Width; h=$r.Height }\n"
+            "  }\n"
+            "}\n"
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
-            "$res.Lines | ForEach-Object { $_.Text }\n"
+            "@($words) | ConvertTo-Json -Compress\n"
         )
         with tempfile.TemporaryDirectory(prefix="dkt_ocr_") as td:
             norm_img = _prepare_ocr_image(path.resolve(), Path(td) / "ocr_input.png")
@@ -372,7 +533,14 @@ def extract_text_from_image(path: Path) -> str:
                 check=False,
             )
             if proc.returncode == 0:
-                return proc.stdout or ""
+                raw = (proc.stdout or "").strip()
+                if not raw:
+                    return "", []
+                parsed = json.loads(raw)
+                words = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+                table = reconstruct_table_from_words(words)
+                text = "\n".join(" ".join(c for c in r if c) for r in table)
+                return text, table
             last_err = (proc.stderr or proc.stdout or "").strip()
 
     tesseract = shutil.which("tesseract")
@@ -386,8 +554,15 @@ def extract_text_from_image(path: Path) -> str:
             check=False,
         )
         if proc.returncode == 0:
-            return proc.stdout or ""
+            txt = proc.stdout or ""
+            return txt, []
         last_err = (proc.stderr or "").strip()
 
     detail = f": {last_err}" if last_err else " (Windows OCR or Tesseract required)."
     raise RuntimeError(f"Could not run OCR on image{detail}")
+
+
+def extract_text_from_image(path: Path) -> str:
+    """Extract text from a PNG/JPG image using Windows OCR or Tesseract."""
+    text, _table = extract_ocr_data_from_image(path)
+    return text

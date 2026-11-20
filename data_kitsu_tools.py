@@ -34,9 +34,9 @@ from pathlib import Path
 
 from PySide6.QtCore import (QByteArray, QPointF, QSize, QStandardPaths, Qt, QStringListModel,
                             QThread, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QPalette, QPen,
-                          QTextCharFormat,
-                          QPixmap, QPolygonF, QTextCursor)
+from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QImage, QKeySequence,
+                           QPainter, QPalette, QPen, QShortcut, QTextCharFormat,
+                           QPixmap, QPolygonF, QTextCursor)
 from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import QTabWidget, QTextBrowser
 import kitsu_client
@@ -46,8 +46,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QRadioButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu,
-    QInputDialog, QDialog, QToolButton, QSpinBox, QCompleter,
+    QRadioButton, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget, QMenu, QInputDialog, QDialog, QToolButton, QSpinBox,
+    QCompleter,
 )
 
 APP_NAME = "Data Kitsu Tools"
@@ -956,7 +957,7 @@ class ShotTree(QTreeWidget):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self._hint = QLabel("DROP CSV / EXCEL / IMAGE\n(or click to browse)", self)
+        self._hint = QLabel("DROP CSV / EXCEL / IMAGE\n(or click to browse, Ctrl+V to paste)", self)
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._hint.setStyleSheet(
@@ -2167,6 +2168,142 @@ class KitsuPublishWorker(QThread):
             self.failed.emit(self.shot.name, f"Kitsu update failed for {self.shot.name}: {exc}")
 
 
+class ShotImportDialog(QDialog):
+    """Interactive column picker when auto-detection cannot identify the shot column."""
+
+    def __init__(self, rows: list[list[str]], detected: dict, source_name: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Select Columns to Import — {source_name}")
+        self.resize(960, 620)
+        self.rows = rows
+        self.detected = detected
+        self.chosen_shots: list = []
+        self.replace_mode = True
+        self._build_ui()
+        self._refresh_preview()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Could not auto-detect the Shot Name column with full confidence. "
+            "Choose the columns below and verify the preview before importing:"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #ff9f43; font-weight: bold;")
+        layout.addWidget(info)
+
+        num_cols = max((len(r) for r in self.rows), default=0)
+        hdr_row = self.detected.get("header_row")
+        col_labels = []
+        for c in range(num_cols):
+            sample = ""
+            if hdr_row is not None and hdr_row < len(self.rows) and c < len(self.rows[hdr_row]):
+                sample = self.rows[hdr_row][c].strip()
+            if not sample:
+                sample = next((r[c].strip() for r in self.rows[:5] if c < len(r) and r[c].strip()), "")
+            col_labels.append(f"Col {c + 1}: {sample[:28]}" if sample else f"Col {c + 1}")
+
+        grid = QGridLayout()
+
+        def _make_col_combo(allow_none: bool, default_idx: int) -> QComboBox:
+            cmb = QComboBox()
+            if allow_none:
+                cmb.addItem("(None)", -1)
+            for idx, lbl in enumerate(col_labels):
+                cmb.addItem(lbl, idx)
+            pos = cmb.findData(default_idx)
+            if pos >= 0:
+                cmb.setCurrentIndex(pos)
+            cmb.currentIndexChanged.connect(self._refresh_preview)
+            return cmb
+
+        self.cmb_name = _make_col_combo(False, self.detected.get("name_col", 0))
+        self.cmb_seq = _make_col_combo(True, self.detected.get("seq_col", -1))
+        self.cmb_frames = _make_col_combo(True, self.detected.get("frames_col", -1))
+        self.cmb_start = _make_col_combo(True, self.detected.get("start_col", -1))
+        self.cmb_end = _make_col_combo(True, self.detected.get("end_col", -1))
+        self.spin_header = QSpinBox()
+        self.spin_header.setRange(-1, max(0, len(self.rows) - 1))
+        self.spin_header.setValue(-1 if hdr_row is None else hdr_row)
+        self.spin_header.setSpecialValueText("No header")
+        self.spin_header.valueChanged.connect(self._refresh_preview)
+
+        grid.addWidget(QLabel("Shot Name Col *"), 0, 0)
+        grid.addWidget(self.cmb_name, 0, 1)
+        grid.addWidget(QLabel("Sequence Col"), 0, 2)
+        grid.addWidget(self.cmb_seq, 0, 3)
+        grid.addWidget(QLabel("Header Row"), 0, 4)
+        grid.addWidget(self.spin_header, 0, 5)
+
+        grid.addWidget(QLabel("Frames / Duration Col"), 1, 0)
+        grid.addWidget(self.cmb_frames, 1, 1)
+        grid.addWidget(QLabel("Start Frame Col"), 1, 2)
+        grid.addWidget(self.cmb_start, 1, 3)
+        grid.addWidget(QLabel("End Frame Col"), 1, 4)
+        grid.addWidget(self.cmb_end, 1, 5)
+        layout.addLayout(grid)
+
+        self.table = QTableWidget(len(self.rows), num_cols)
+        self.table.setHorizontalHeaderLabels(col_labels)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for r_idx, row in enumerate(self.rows):
+            for c_idx in range(num_cols):
+                val = row[c_idx] if c_idx < len(row) else ""
+                self.table.setItem(r_idx, c_idx, QTableWidgetItem(val))
+        self.table.resizeColumnsToContents()
+        layout.addWidget(self.table, 1)
+
+        self.preview_lbl = QLabel()
+        self.preview_lbl.setWordWrap(True)
+        layout.addWidget(self.preview_lbl)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_append = QPushButton("Append to Shot List")
+        self.btn_replace = QPushButton("Replace Shot List")
+        self.btn_replace.setStyleSheet("font-weight: bold;")
+        btn_cancel = QPushButton("Cancel")
+        self.btn_append.clicked.connect(lambda: self._finish(False))
+        self.btn_replace.clicked.connect(lambda: self._finish(True))
+        btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(self.btn_append)
+        btns.addWidget(self.btn_replace)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+    def _current_records(self) -> list[dict]:
+        hdr = self.spin_header.value()
+        return shot_import.extract_shots_from_table_with_mapping(
+            self.rows,
+            name_col=self.cmb_name.currentData(),
+            seq_col=self.cmb_seq.currentData(),
+            frames_col=self.cmb_frames.currentData(),
+            start_col=self.cmb_start.currentData(),
+            end_col=self.cmb_end.currentData(),
+            header_row=None if hdr < 0 else hdr,
+        )
+
+    def _refresh_preview(self):
+        recs = self._current_records()
+        sample = ", ".join(
+            f"{r['name']} [{frames_text(r['frames'])}]" for r in recs[:6]
+        )
+        more = f" ... (+{len(recs) - 6} more)" if len(recs) > 6 else ""
+        self.preview_lbl.setText(f"Preview ({len(recs)} shot(s)): {sample}{more}")
+        self.btn_append.setEnabled(bool(recs))
+        self.btn_replace.setEnabled(bool(recs))
+
+    def _finish(self, replace: bool):
+        recs = self._current_records()
+        if not recs:
+            return
+        self.chosen_shots = [
+            Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs
+        ]
+        self.replace_mode = replace
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2213,6 +2350,8 @@ class MainWindow(QMainWindow):
         self._autosave = QTimer(self)
         self._autosave.timeout.connect(self.save_session)
         self._autosave.start(20000)         # save every 20 seconds
+        self._paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
+        self._paste_shortcut.activated.connect(self.paste_from_clipboard)
 
     # ---------- layout ----------
     def _build_ui(self):
@@ -2389,6 +2528,7 @@ class MainWindow(QMainWindow):
         add_menu = QMenu(self.btn_add)
         add_menu.addAction("Fetch from Kitsu...", self.open_kitsu_dialog)
         add_menu.addAction("Import CSV / Excel / Image...", self.browse_csv)
+        add_menu.addAction("Paste Screenshot (Ctrl+V)", self.paste_from_clipboard)
         add_menu.addSeparator()
         add_menu.addAction("Add shot folder...", self.add_folder_shot)
         add_menu.addAction("Add shot by name...", self.add_named_shot)
@@ -2577,6 +2717,53 @@ class MainWindow(QMainWindow):
     def load_csv_path(self, path: Path, replace: bool):
         self.load_import_path(path, replace=replace)
 
+    def _import_from_table_or_text(
+        self,
+        rows: list[list[str]],
+        text: str,
+        replace: bool,
+        source_desc: str,
+    ):
+        if rows:
+            info = shot_import.detect_table_columns(rows)
+            if info["confident"]:
+                recs = shot_import.extract_shots_from_table_with_mapping(
+                    rows,
+                    name_col=info["name_col"],
+                    seq_col=info["seq_col"],
+                    frames_col=info["frames_col"],
+                    start_col=info["start_col"],
+                    end_col=info["end_col"],
+                    header_row=info["header_row"],
+                )
+                if recs:
+                    new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
+                    self._apply_loaded_shots(new_shots, replace=replace, source_desc=source_desc)
+                    return
+            dlg = ShotImportDialog(rows, info, source_desc, parent=self)
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen_shots:
+                self._apply_loaded_shots(dlg.chosen_shots, replace=dlg.replace_mode, source_desc=source_desc)
+            return
+
+        recs = shot_import.parse_shots_from_text(text)
+        if recs:
+            new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
+            self._apply_loaded_shots(new_shots, replace=replace, source_desc=source_desc)
+            return
+        lines = [[ln.strip()] for ln in (text or "").splitlines() if ln.strip()]
+        if lines:
+            dlg = ShotImportDialog(
+                lines,
+                {"confident": False, "header_row": None, "name_col": 0, "seq_col": -1,
+                 "frames_col": -1, "start_col": -1, "end_col": -1},
+                source_desc,
+                parent=self,
+            )
+            if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen_shots:
+                self._apply_loaded_shots(dlg.chosen_shots, replace=dlg.replace_mode, source_desc=source_desc)
+            return
+        raise ValueError("No text or shot names were recognized.")
+
     def load_import_path(self, path: Path, replace: bool):
         if self._busy():
             self.log("Cannot load a shot list while scanning or copying.")
@@ -2585,22 +2772,72 @@ class MainWindow(QMainWindow):
         try:
             if ext == ".csv":
                 new_shots = load_csv(path)
-            elif ext in (".xlsx", ".xlsm", ".xls"):
+                self._apply_loaded_shots(new_shots, replace=replace, source_desc=path.name)
+                return
+            if ext in (".xlsx", ".xlsm", ".xls"):
                 rows = shot_import.read_excel_rows(path)
-                recs = shot_import.parse_shots_from_table(rows)
-                new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
-            elif ext in (".png", ".jpg", ".jpeg"):
-                text = shot_import.extract_text_from_image(path)
-                recs = shot_import.parse_shots_from_text(text)
-                if not recs:
-                    raise ValueError("No shot names were recognized in this image.")
-                new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
-            else:
-                raise ValueError(f"Unsupported file type: {ext}")
+                self._import_from_table_or_text(rows, "", replace=replace, source_desc=path.name)
+                return
+            if ext in (".png", ".jpg", ".jpeg"):
+                text, rows = shot_import.extract_ocr_data_from_image(path)
+                self._import_from_table_or_text(rows, text, replace=replace, source_desc=path.name)
+                return
+            raise ValueError(f"Unsupported file type: {ext}")
         except Exception as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not read {path.name}:\n{exc}")
+
+    def paste_from_clipboard(self):
+        focus = QApplication.focusWidget()
+        mime = QApplication.clipboard().mimeData()
+        if mime is None:
             return
-        self._apply_loaded_shots(new_shots, replace=replace, source_desc=path.name)
+
+        if mime.hasImage():
+            if self._busy():
+                self.log("Cannot import a screenshot while scanning or copying.")
+                return
+            img = QImage(mime.imageData())
+            if img.isNull():
+                return
+            with tempfile.TemporaryDirectory(prefix="dkt_clip_") as td:
+                tmp_png = Path(td) / "clipboard.png"
+                if not img.save(str(tmp_png), "PNG"):
+                    return
+                try:
+                    text, rows = shot_import.extract_ocr_data_from_image(tmp_png)
+                    self._import_from_table_or_text(
+                        rows, text, replace=False, source_desc="Clipboard Screenshot"
+                    )
+                except Exception as exc:
+                    QMessageBox.critical(self, APP_NAME, f"Could not read clipboard image:\n{exc}")
+            return
+
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QSpinBox)):
+            if hasattr(focus, "paste"):
+                focus.paste()
+            return
+
+        if mime.hasUrls():
+            paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+            if paths:
+                self.on_tree_dropped(paths)
+                return
+
+        if mime.hasText():
+            text = mime.text()
+            if not text.strip():
+                return
+            tab_rows = [
+                [c.strip() for c in ln.split("\t")]
+                for ln in text.splitlines()
+                if "\t" in ln and ln.strip()
+            ]
+            try:
+                self._import_from_table_or_text(
+                    tab_rows, text, replace=False, source_desc="Clipboard Text"
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, APP_NAME, f"Could not parse clipboard text:\n{exc}")
 
     def _update_kitsu_badge(self):
         user = self._kitsu_client.user
