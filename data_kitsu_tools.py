@@ -47,9 +47,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QRadioButton, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget, QMenu, QInputDialog, QDialog, QToolButton, QSpinBox,
-    QCompleter,
+    QRadioButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog, QDialog,
+    QToolButton, QSpinBox, QCompleter,
 )
 
 APP_NAME = "Data Kitsu Tools"
@@ -2374,12 +2374,17 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        body = QHBoxLayout()
-        outer.addLayout(body, 1)
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        outer.addWidget(self.v_splitter, 1)
 
-        # Left column: CSV drop zone, paths, mode boxes and action buttons
-        left = QVBoxLayout()
-        body.addLayout(left, 0)
+        self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.v_splitter.addWidget(self.h_splitter)
+
+        # Left column: paths, mode boxes and action buttons
+        left_widget = QWidget()
+        left = QVBoxLayout(left_widget)
+        left.setContentsMargins(0, 0, 4, 0)
+        self.h_splitter.addWidget(left_widget)
 
         paths_box = QGroupBox()
         grid = QGridLayout(paths_box)
@@ -2482,11 +2487,25 @@ class MainWindow(QMainWindow):
         self.chk_skip_sys.setChecked(True)
         self.chk_sound = QCheckBox("8-BIT SOUND")
         self.chk_sound.setChecked(True)
-        self.chk_sound.toggled.connect(self._on_sound_toggled)
+        self.chk_sound.toggled.connect(self._on_sound_8_toggled)
+        self.chk_sound_16 = QCheckBox("16-BIT SOUND")
+        self.chk_sound_16.toggled.connect(self._on_sound_16_toggled)
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(QLabel("VOL"))
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(70)
+        self.slider_vol.valueChanged.connect(self._on_volume_changed)
+        self.lbl_vol = QLabel("70%")
+        self.lbl_vol.setMinimumWidth(34)
+        vol_row.addWidget(self.slider_vol, 1)
+        vol_row.addWidget(self.lbl_vol)
         mv.addWidget(self.chk_skip)
         mv.addWidget(self.chk_overwrite)
         mv.addWidget(self.chk_skip_sys)
         mv.addWidget(self.chk_sound)
+        mv.addWidget(self.chk_sound_16)
+        mv.addLayout(vol_row)
         thread_row = QHBoxLayout()
         thread_row.addWidget(QLabel("THREADS / SHOT"))
         self.spin_threads = QSpinBox()
@@ -2518,8 +2537,12 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
 
         # Right column: SHOTS LIST
-        right = QVBoxLayout()
-        body.addLayout(right, 1)
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setContentsMargins(4, 0, 0, 0)
+        self.h_splitter.addWidget(right_widget)
+        self.h_splitter.setStretchFactor(0, 0)
+        self.h_splitter.setStretchFactor(1, 1)
         title_row = QHBoxLayout()
         title = QLabel("SHOTS LIST")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -2545,12 +2568,13 @@ class MainWindow(QMainWindow):
         self.tree.itemCollapsed.connect(self._on_collapsed)
         header = self.tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        self.tree.setColumnWidth(COL_NO, 60)
-        self.tree.setColumnWidth(COL_SEQ, 90)
+        header.setStretchLastSection(True)
+        self.tree.setColumnWidth(COL_NO, 55)
+        self.tree.setColumnWidth(COL_SEQ, 110)
+        self.tree.setColumnWidth(COL_NAME, 320)
         self.tree.setColumnWidth(COL_VERSION, 140)
-        self.tree.setColumnWidth(COL_FRAMES, 80)
-        self.tree.setColumnWidth(COL_STATUS, 120)
+        self.tree.setColumnWidth(COL_FRAMES, 75)
+        self.tree.setColumnWidth(COL_STATUS, 140)
         right.addWidget(self.tree, 1)
 
         tree_buttons = QHBoxLayout()
@@ -2592,9 +2616,12 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
-        self.log_view.setMaximumHeight(140)
+        self.log_view.setMinimumHeight(80)
+        self.v_splitter.addWidget(self.log_view)
+        self.v_splitter.setStretchFactor(0, 1)
+        self.v_splitter.setStretchFactor(1, 0)
+        self.v_splitter.setSizes([680, 140])
         outer.addWidget(self.progress)
-        outer.addWidget(self.log_view)
 
     @staticmethod
     def _mode_button(text: str) -> QPushButton:
@@ -2667,8 +2694,31 @@ class MainWindow(QMainWindow):
         self.chk_kitsu_publish.setEnabled(not checked and not self._running)
         self._update_previews()
 
-    def _on_sound_toggled(self, checked: bool):
-        self._sfx.enabled = checked
+    def _sync_sound_mode(self):
+        if self.chk_sound_16.isChecked():
+            self._sfx.mode = "16bit"
+        elif self.chk_sound.isChecked():
+            self._sfx.mode = "8bit"
+        else:
+            self._sfx.mode = "off"
+
+    def _on_sound_8_toggled(self, checked: bool):
+        if checked and self.chk_sound_16.isChecked():
+            self.chk_sound_16.blockSignals(True)
+            self.chk_sound_16.setChecked(False)
+            self.chk_sound_16.blockSignals(False)
+        self._sync_sound_mode()
+
+    def _on_sound_16_toggled(self, checked: bool):
+        if checked and self.chk_sound.isChecked():
+            self.chk_sound.blockSignals(True)
+            self.chk_sound.setChecked(False)
+            self.chk_sound.blockSignals(False)
+        self._sync_sound_mode()
+
+    def _on_volume_changed(self, value: int):
+        self.lbl_vol.setText(f"{value}%")
+        self._sfx.set_volume(value)
 
     def swap_paths(self):
         if self._running:
@@ -2716,7 +2766,8 @@ class MainWindow(QMainWindow):
         consistent = self.chk_consistent_path.isChecked()
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
                   self.spin_threads, self.chk_consistent_path,
-                  self.chk_skip, self.chk_overwrite, self.chk_skip_sys, self.chk_sound,
+                  self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
+                  self.chk_sound, self.chk_sound_16, self.slider_vol,
                   *self.scan_checks.values()):
             w.setEnabled(not self._running)
         self.chk_dailies.setEnabled(not self._running and not consistent)
@@ -3064,6 +3115,39 @@ class MainWindow(QMainWindow):
             return None
         return self._shot_folder(index)
 
+    def _shot_source_and_dest(self, shot: Shot, src_path: Path | None = None) -> tuple[Path | None, Path | None]:
+        """Compute (source_path, destination_path) for a shot or variant."""
+        if src_path is None:
+            if shot.scan and shot.scan.units:
+                src_path = shot.scan.units[0].path
+            else:
+                copy_from = self._copy_from()
+                if copy_from:
+                    src_path = self._preview_cache.get((str(copy_from), shot.name))
+
+        paste_to = self._paste_to()
+        if paste_to is None:
+            return src_path, None
+
+        mode = shot.scan.mode if shot.scan else self._effective_mode()
+        dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
+        base = (paste_to / dailies) if (mode == MODE_PUBLISH and dailies) else paste_to
+        copy_from = self._copy_from()
+
+        if src_path is not None:
+            if mode == MODE_PUBLISH:
+                dst_path = base / src_path.name
+            elif copy_from is not None:
+                try:
+                    dst_path = paste_to / src_path.relative_to(copy_from)
+                except ValueError:
+                    dst_path = paste_to / src_path.name
+            else:
+                dst_path = paste_to / src_path.name
+        else:
+            dst_path = base / shot.name
+        return src_path, dst_path
+
     def on_tree_context_menu(self, pos):
         item = self.tree.itemAt(pos)
         if item is None:
@@ -3071,33 +3155,44 @@ class MainWindow(QMainWindow):
         if not item.isSelected():
             self.tree.clearSelection()
             item.setSelected(True)
-        path = self._item_path(item)
+        src_path = self._item_path(item)
+        top = item.parent() or item
+        index = top.data(COL_NAME, ROLE_INDEX)
+        dst_path = None
+        if index is not None and index < len(self.shots):
+            _, dst_path = self._shot_source_and_dest(self.shots[index], src_path=src_path)
+
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
-        act_open = menu.addAction("Open in Explorer")
+        act_open_src = menu.addAction("Open Source")
+        act_open_dst = menu.addAction("Open Destination")
         act_copy = menu.addAction("Copy path")
-        if item.parent() is None:
-            index = item.data(COL_NAME, ROLE_INDEX)
-            if index is not None and index < len(self.shots):
-                shot = self.shots[index]
-                act_force = menu.addAction("Force copy")
-                act_force.setCheckable(True)
-                act_force.setChecked(shot.force_copy)
-                act_force.setEnabled(shot.scan is not None and shot.scan.found > 0
-                                     and shot.state != "done" and not self._busy())
-                act_force.setToolTip("Copy even if the frame count differs; existing files are overwritten")
-                act_force.triggered.connect(
-                    lambda checked=False, i=index: self.set_force_copy(i, checked))
+        if item.parent() is None and index is not None and index < len(self.shots):
+            shot = self.shots[index]
+            act_force = menu.addAction("Force copy")
+            act_force.setCheckable(True)
+            act_force.setChecked(shot.force_copy)
+            act_force.setEnabled(shot.scan is not None and shot.scan.found > 0
+                                 and shot.state != "done" and not self._busy())
+            act_force.setToolTip("Copy even if the frame count differs; existing files are overwritten")
+            act_force.triggered.connect(
+                lambda checked=False, i=index: self.set_force_copy(i, checked))
         menu.addSeparator()
         act_remove = menu.addAction("Remove")
         act_remove.setEnabled(not self._busy())
-        if path is None:
-            act_open.setEnabled(False)
+
+        if src_path is None:
+            act_open_src.setEnabled(False)
             act_copy.setEnabled(False)
-            act_open.setToolTip("Folder not found in COPY FROM")
-            act_copy.setToolTip("Folder not found in COPY FROM")
-        act_open.triggered.connect(lambda _=False: self.open_path(path))
-        act_copy.triggered.connect(lambda _=False: self.copy_path(path))
+            act_open_src.setToolTip("Source folder not found in COPY FROM")
+            act_copy.setToolTip("Source folder not found in COPY FROM")
+        if dst_path is None:
+            act_open_dst.setEnabled(False)
+            act_open_dst.setToolTip("PASTE TO folder is not set")
+
+        act_open_src.triggered.connect(lambda _=False: self.open_path(src_path))
+        act_open_dst.triggered.connect(lambda _=False: self.open_dest_path(dst_path))
+        act_copy.triggered.connect(lambda _=False: self.copy_path(src_path))
         act_remove.triggered.connect(lambda _=False: self.remove_selected())
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
@@ -3144,6 +3239,20 @@ class MainWindow(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             QMessageBox.warning(self, APP_NAME, f"Could not open:\n{path}")
 
+    def open_dest_path(self, path: Path):
+        target = path
+        while target is not None and not target.exists():
+            parent = target.parent
+            if parent == target:
+                target = None
+                break
+            target = parent
+        if target is None or not target.exists():
+            QMessageBox.warning(self, APP_NAME, f"Destination folder not found:\n{path}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            QMessageBox.warning(self, APP_NAME, f"Could not open:\n{target}")
+
     def refresh_tree(self):
         self.tree.clear()
         self.items = {}
@@ -3174,8 +3283,15 @@ class MainWindow(QMainWindow):
         item.setText(COL_VERSION, shot.scan.version_text if shot.scan else "")
         item.setText(COL_FRAMES, frames_text(shot.frames))
         item.setText(COL_STATUS, status_text(shot))
+        src_path, dst_path = self._shot_source_and_dest(shot)
+        tip_lines = [
+            f"Source: {src_path if src_path else '(not found / not scanned)'}",
+            f"Destination: {dst_path if dst_path else '(PASTE TO not set)'}",
+        ]
         problem = shot_problem(shot)
-        tip = f"{problem[1]}\n{problem[2]}" if problem else ""
+        if problem:
+            tip_lines.append(problem[1])
+        tip = "\n".join(tip_lines)
         for col in range(COLUMNS):
             item.setToolTip(col, tip)
         apply_style(item, row_style(shot))
@@ -3356,6 +3472,7 @@ class MainWindow(QMainWindow):
     def on_pause(self):
         if not self._running or self.worker is None:
             return
+        self._sfx.play("pause")
         if self.worker.pause_event.is_set():
             self.worker.pause_event.clear()
             self.btn_pause.setText("PAUSE")
@@ -3437,14 +3554,15 @@ class MainWindow(QMainWindow):
         if not shot.scan or not shot.scan.units:
             return
         unit = shot.scan.units[0]
-        dest_base = Path(shot.scan.dest) if shot.scan.dest else None
-        if dest_base is None:
-            paste_to = self._paste_to()
-            if paste_to is None:
-                return
+        paste_to = self._paste_to()
+        if shot.scan.dest:
+            dest_path = str(Path(shot.scan.dest) / unit.path.name) if Path(shot.scan.dest).name != unit.path.name else shot.scan.dest
+        elif paste_to is not None:
             dailies = self._dailies_name() if self.chk_dailies.isChecked() else ""
-            dest_base = destination_base(paste_to, MODE_PUBLISH, dailies)
-        dest_path = str(dest_base / unit.path.name)
+            copy_from = self._copy_from() or unit.path.parent
+            dest_path = str(destination_base(unit, MODE_PUBLISH, copy_from, paste_to, dailies))
+        else:
+            return
 
         worker = KitsuPublishWorker(
             client=self._kitsu_client,
@@ -3488,7 +3606,10 @@ class MainWindow(QMainWindow):
             "publish_types": selected_types,
             "dailies": self.chk_dailies.isChecked(),
             "kitsu_publish": self.chk_kitsu_publish.isChecked(),
-            "sound": self.chk_sound.isChecked(),
+            "sound_mode": self._sfx.mode,
+            "sound_volume": self.slider_vol.value(),
+            "h_splitter": self.h_splitter.sizes(),
+            "v_splitter": self.v_splitter.sizes(),
             "overwrite": self.chk_overwrite.isChecked(),
             "skip_system": self.chk_skip_sys.isChecked(),
             "threads": self.spin_threads.value(),
@@ -3539,8 +3660,23 @@ class MainWindow(QMainWindow):
         if consistent is None:
             consistent = (data.get("current_mode", MODE_LOCAL) == MODE_LOCAL)
         self.chk_consistent_path.setChecked(bool(consistent))
-        self.chk_sound.setChecked(bool(data.get("sound", True)))
-        self._sfx.enabled = self.chk_sound.isChecked()
+        sound_mode = data.get("sound_mode")
+        if sound_mode is None:
+            sound_mode = "8bit" if data.get("sound", True) else "off"
+        self.chk_sound.blockSignals(True)
+        self.chk_sound_16.blockSignals(True)
+        self.chk_sound.setChecked(sound_mode == "8bit")
+        self.chk_sound_16.setChecked(sound_mode == "16bit")
+        self.chk_sound.blockSignals(False)
+        self.chk_sound_16.blockSignals(False)
+        self._sync_sound_mode()
+        vol = int(data.get("sound_volume", 70))
+        self.slider_vol.setValue(max(0, min(100, vol)))
+        self._on_volume_changed(self.slider_vol.value())
+        if isinstance(data.get("h_splitter"), list) and len(data["h_splitter"]) == 2:
+            self.h_splitter.setSizes([int(x) for x in data["h_splitter"]])
+        if isinstance(data.get("v_splitter"), list) and len(data["v_splitter"]) == 2:
+            self.v_splitter.setSizes([int(x) for x in data["v_splitter"]])
         self.chk_skip_sys.setChecked(bool(data.get("skip_system", True)))
         self.spin_threads.setValue(int(data.get("threads", MAX_WORKERS)))
         if data.get("overwrite"):
