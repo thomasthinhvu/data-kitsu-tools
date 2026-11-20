@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -38,17 +39,19 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QPainter, QP
                           QPixmap, QPolygonF, QTextCursor)
 from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import QTabWidget, QTextBrowser
+import kitsu_client
+import shot_import
 import updater  # stdlib helper next to this file: GitHub version check and update
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu, QInputDialog,
-    QDialog, QToolButton, QSpinBox, QCompleter,
+    QRadioButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu,
+    QInputDialog, QDialog, QToolButton, QSpinBox, QCompleter,
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "1.23"
+APP_VERSION = "2.0.0"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -146,6 +149,7 @@ class Shot:
     force_overwrite: bool = False   # set after STOP so the next run overwrites
     force_copy: bool = False        # user chose "Force copy": copy despite a frame mismatch, overwrite
     seq: str = ""                   # Sequence column of the CSV (shown in the SEQ column)
+    kitsu_id: str = ""              # Kitsu shot ID when imported from Kitsu
 
 
 def frames_text(frames) -> str:
@@ -614,6 +618,51 @@ def load_csv(path: Path) -> list:
     return shots
 
 
+def shots_from_kitsu(records: list[dict], include_episode_in_seq: bool = False) -> list:
+    """Convert Kitsu API shot records into ``Shot`` objects.
+
+    Applies the same Sequence + bare-number Name prefix rule as ``load_csv``
+    so shots fetched directly from Kitsu match local folders identically.
+    """
+    shots, seen = [], set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        raw_name = str(rec.get("name") or "").strip()
+        seq = str(rec.get("sequence") or "").strip()
+        ep = str(rec.get("episode") or "").strip()
+        if include_episode_in_seq and ep and seq:
+            seq_label = f"{ep}_{seq}"
+        else:
+            seq_label = seq
+
+        name = raw_name
+        if name and BARE_NAME_RE.match(name) and "_" in seq_label:
+            name = f"{seq_label}_{name}"
+        elif name and BARE_NAME_RE.match(name) and "_" in seq:
+            name = f"{seq}_{name}"
+        if not name or name in seen or "/" in name or "\\" in name:
+            continue
+        seen.add(name)
+
+        frames_val = rec.get("frames")
+        frames = None
+        if frames_val is not None:
+            try:
+                frames = int(frames_val)
+            except (TypeError, ValueError):
+                frames = None
+        shots.append(
+            Shot(
+                name=name,
+                frames=frames,
+                seq=seq_label or ep,
+                kitsu_id=str(rec.get("id") or ""),
+            )
+        )
+    return shots
+
+
 # ----------------------------------------------------------------------------
 # Status / colour rules
 # ----------------------------------------------------------------------------
@@ -907,7 +956,7 @@ class ShotTree(QTreeWidget):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self._hint = QLabel("DROP CSV FILE\n(or click to browse)", self)
+        self._hint = QLabel("DROP CSV / EXCEL / IMAGE\n(or click to browse)", self)
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._hint.setStyleSheet(
@@ -1354,6 +1403,770 @@ class AboutDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir())))
 
 
+class KitsuWorker(QThread):
+    """Run Kitsu API requests off the GUI thread."""
+
+    finished_ok = Signal(str, object)
+    failed = Signal(str, str)
+
+    def __init__(self, client: kitsu_client.KitsuClient, action: str, params: dict | None = None):
+        super().__init__()
+        self.client = client
+        self.action = action
+        self.params = params or {}
+
+    def run(self):
+        try:
+            if self.action == "login":
+                url = self.params["url"]
+                verify_ssl = self.params.get("verify_ssl", True)
+                self.client.set_host(url, verify_ssl=verify_ssl)
+                if not self.client.validate_url():
+                    raise kitsu_client.KitsuConnectionError(
+                        f"Could not find a Kitsu server at {self.client.api_url}."
+                    )
+                if self.params.get("auth_mode") == "token":
+                    self.client.set_token(self.params.get("token", ""))
+                    user = self.client.get_current_user()
+                    if not user:
+                        self.client.set_token(None)
+                        raise kitsu_client.KitsuAuthError("Kitsu API token is invalid or expired.")
+                else:
+                    self.client.login(
+                        self.params.get("email", ""),
+                        self.params.get("password", ""),
+                        totp=self.params.get("totp") or None,
+                    )
+                    user = self.client.get_current_user() or self.client.user
+                projects = self.client.get_projects(open_only=self.params.get("open_only", True))
+                self.finished_ok.emit(self.action, {"user": user, "projects": projects})
+
+            elif self.action == "restore":
+                self.client.set_host(
+                    self.params["url"],
+                    verify_ssl=self.params.get("verify_ssl", True),
+                )
+                self.client.set_token(self.params.get("tokens"))
+                user = self.client.get_current_user()
+                if not user:
+                    self.client.set_token(None)
+                    raise kitsu_client.KitsuAuthError("Saved Kitsu session expired.")
+                projects = self.client.get_projects(open_only=self.params.get("open_only", True))
+                self.finished_ok.emit(self.action, {"user": user, "projects": projects})
+
+            elif self.action == "projects":
+                projects = self.client.get_projects(open_only=self.params.get("open_only", True))
+                self.finished_ok.emit(self.action, {"projects": projects})
+
+            elif self.action == "hierarchy":
+                project_id = self.params["project_id"]
+                episodes = self.client.get_episodes(project_id)
+                sequences = self.client.get_sequences(project_id)
+                self.finished_ok.emit(
+                    self.action,
+                    {"project_id": project_id, "episodes": episodes, "sequences": sequences},
+                )
+
+            elif self.action == "shots":
+                shots = self.client.get_shots(
+                    self.params["project_id"],
+                    episode_id=self.params.get("episode_id"),
+                    sequence_id=self.params.get("sequence_id"),
+                )
+                self.finished_ok.emit(self.action, {"shots": shots})
+
+        except Exception as exc:
+            self.failed.emit(self.action, str(exc))
+
+
+class KitsuDialog(QDialog):
+    """Connect to a Kitsu server, browse projects/episodes/sequences, and import shots."""
+
+    import_requested = Signal(list, bool, str, str)   # (records, replace, prj_name, prj_id)
+
+    def __init__(self, client: kitsu_client.KitsuClient, config: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fetch Shots from Kitsu")
+        self.resize(1040, 720)
+        self.client = client
+        self.config = dict(config)
+        self._worker: KitsuWorker | None = None
+        self._projects: list[dict] = []
+        self._episodes: list[dict] = []
+        self._sequences: list[dict] = []
+        self._records: list[dict] = []
+        self._build_ui()
+        self._load_config()
+        if self.client.user and self.client.access_token:
+            self._set_connected_state(self.client.user)
+            self._start_worker("projects", {"open_only": not self.chk_closed.isChecked()})
+        elif self.config.get("url") and self.config.get("session_tokens"):
+            self._start_worker(
+                "restore",
+                {
+                    "url": self.config["url"],
+                    "verify_ssl": self.chk_ssl.isChecked(),
+                    "tokens": self.config["session_tokens"],
+                    "open_only": not self.chk_closed.isChecked(),
+                },
+            )
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 1. Server & Authentication
+        auth_box = QGroupBox("Kitsu Connection")
+        ag = QGridLayout(auth_box)
+
+        ag.addWidget(QLabel("Server URL"), 0, 0)
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://kitsu.studio.com")
+        ag.addWidget(self.url_edit, 0, 1, 1, 3)
+
+        self.chk_ssl = QCheckBox("Verify SSL")
+        self.chk_ssl.setChecked(True)
+        self.chk_ssl.setToolTip("Uncheck for self-signed studio Kitsu HTTPS certificates.")
+        ag.addWidget(self.chk_ssl, 0, 4)
+
+        mode_row = QHBoxLayout()
+        self.rb_password = QRadioButton("Email & Password")
+        self.rb_token = QRadioButton("API Token")
+        self.rb_password.setChecked(True)
+        self.rb_password.toggled.connect(self._update_auth_fields)
+        mode_row.addWidget(self.rb_password)
+        mode_row.addWidget(self.rb_token)
+        mode_row.addStretch(1)
+        ag.addLayout(mode_row, 1, 1, 1, 4)
+
+        self.lbl_email = QLabel("Email")
+        self.email_edit = QLineEdit()
+        self.email_edit.setPlaceholderText("user@studio.com")
+        self.lbl_pass = QLabel("Password")
+        self.pass_edit = QLineEdit()
+        self.pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lbl_totp = QLabel("2FA Code")
+        self.totp_edit = QLineEdit()
+        self.totp_edit.setPlaceholderText("Optional")
+        self.totp_edit.setMaximumWidth(100)
+
+        ag.addWidget(self.lbl_email, 2, 0)
+        ag.addWidget(self.email_edit, 2, 1)
+        ag.addWidget(self.lbl_pass, 2, 2)
+        ag.addWidget(self.pass_edit, 2, 3)
+
+        totp_row = QHBoxLayout()
+        totp_row.addWidget(self.lbl_totp)
+        totp_row.addWidget(self.totp_edit)
+        ag.addLayout(totp_row, 2, 4)
+
+        self.lbl_token = QLabel("API Token")
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("Paste Kitsu access token")
+        ag.addWidget(self.lbl_token, 3, 0)
+        ag.addWidget(self.token_edit, 3, 1, 1, 4)
+
+        btn_row = QHBoxLayout()
+        self.btn_connect = QPushButton("Connect / Sign In")
+        self.btn_connect.clicked.connect(self._on_connect)
+        self.btn_logout = QPushButton("Sign Out")
+        self.btn_logout.clicked.connect(self._on_logout)
+        self.btn_logout.setEnabled(False)
+        self.status_lbl = QLabel("Not connected")
+        self.status_lbl.setStyleSheet("color: #8a8f98;")
+        btn_row.addWidget(self.btn_connect)
+        btn_row.addWidget(self.btn_logout)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(self.status_lbl, 1)
+        ag.addLayout(btn_row, 4, 0, 1, 5)
+
+        layout.addWidget(auth_box)
+
+        # 2. Project / Episode / Sequence Filter
+        filter_box = QGroupBox("Project & Shots")
+        fg = QGridLayout(filter_box)
+
+        fg.addWidget(QLabel("Project"), 0, 0)
+        self.cmb_project = QComboBox()
+        self.cmb_project.currentIndexChanged.connect(self._on_project_changed)
+        fg.addWidget(self.cmb_project, 0, 1, 1, 2)
+
+        self.chk_closed = QCheckBox("Include closed")
+        self.chk_closed.toggled.connect(self._on_refresh_projects)
+        fg.addWidget(self.chk_closed, 0, 3)
+
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.clicked.connect(self._on_refresh_projects)
+        fg.addWidget(self.btn_refresh, 0, 4)
+
+        fg.addWidget(QLabel("Episode"), 1, 0)
+        self.cmb_episode = QComboBox()
+        self.cmb_episode.currentIndexChanged.connect(self._on_episode_changed)
+        fg.addWidget(self.cmb_episode, 1, 1)
+
+        fg.addWidget(QLabel("Sequence"), 1, 2)
+        self.cmb_sequence = QComboBox()
+        fg.addWidget(self.cmb_sequence, 1, 3)
+
+        self.btn_fetch = QPushButton("Fetch Shots")
+        self.btn_fetch.setStyleSheet("font-weight: bold;")
+        self.btn_fetch.clicked.connect(self._on_fetch_shots)
+        fg.addWidget(self.btn_fetch, 1, 4)
+
+        fg.addWidget(QLabel("Search"), 2, 0)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Filter shots by name, sequence, episode or artist...")
+        self.search_edit.textChanged.connect(self._apply_filter)
+        fg.addWidget(self.search_edit, 2, 1, 1, 4)
+
+        # Task & Assignment filters (Assignations, Prepare, Compositing, Other columns)
+        fg.addWidget(QLabel("Assignations"), 3, 0)
+        self.cmb_assignee = QComboBox()
+        self.cmb_assignee.addItem("All Assignees", "")
+        self.cmb_assignee.currentIndexChanged.connect(self._apply_filter)
+        fg.addWidget(self.cmb_assignee, 3, 1)
+
+        fg.addWidget(QLabel("Prepare"), 3, 2)
+        self.cmb_prepare = QComboBox()
+        self.cmb_prepare.addItem("All", "")
+        self.cmb_prepare.currentIndexChanged.connect(self._apply_filter)
+        fg.addWidget(self.cmb_prepare, 3, 3)
+
+        comp_row = QHBoxLayout()
+        comp_row.addWidget(QLabel("Compositing"))
+        self.cmb_compositing = QComboBox()
+        self.cmb_compositing.addItem("All", "")
+        self.cmb_compositing.currentIndexChanged.connect(self._apply_filter)
+        comp_row.addWidget(self.cmb_compositing, 1)
+        fg.addLayout(comp_row, 3, 4)
+
+        fg.addWidget(QLabel("Other Column"), 4, 0)
+        self.cmb_other_col = QComboBox()
+        self.cmb_other_col.addItem("Any Column", "")
+        self.cmb_other_col.currentIndexChanged.connect(self._on_other_col_changed)
+        fg.addWidget(self.cmb_other_col, 4, 1)
+
+        fg.addWidget(QLabel("Column Status"), 4, 2)
+        self.cmb_other_status = QComboBox()
+        self.cmb_other_status.addItem("All", "")
+        self.cmb_other_status.currentIndexChanged.connect(self._apply_filter)
+        fg.addWidget(self.cmb_other_status, 4, 3, 1, 2)
+
+        layout.addWidget(filter_box)
+
+        # 3. Shots Preview Tree
+        self.shot_tree = QTreeWidget()
+        self.shot_tree.setHeaderLabels([
+            "SHOT", "EPISODE", "SEQUENCE", "FRAMES",
+            "ASSIGNATIONS", "PREPARE", "COMPOSITING", "INFO",
+        ])
+        self.shot_tree.setRootIsDecorated(False)
+        self.shot_tree.setUniformRowHeights(True)
+        self.shot_tree.itemChanged.connect(self._update_selected_count)
+        hdr = self.shot_tree.header()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.shot_tree.setColumnWidth(1, 90)
+        self.shot_tree.setColumnWidth(2, 100)
+        self.shot_tree.setColumnWidth(3, 65)
+        self.shot_tree.setColumnWidth(4, 150)
+        self.shot_tree.setColumnWidth(5, 105)
+        self.shot_tree.setColumnWidth(6, 105)
+        self.shot_tree.setColumnWidth(7, 120)
+        layout.addWidget(self.shot_tree, 1)
+
+        # 4. Bottom selection + import buttons
+        bottom = QHBoxLayout()
+        self.btn_sel_all = QPushButton("Select All")
+        self.btn_sel_none = QPushButton("Select None")
+        self.btn_sel_vis = QPushButton("Select Visible")
+        self.btn_sel_all.clicked.connect(lambda: self._set_checks(True, visible_only=False))
+        self.btn_sel_none.clicked.connect(lambda: self._set_checks(False, visible_only=False))
+        self.btn_sel_vis.clicked.connect(lambda: self._set_checks(True, visible_only=True))
+        self.count_lbl = QLabel("0 / 0 selected")
+        bottom.addWidget(self.btn_sel_all)
+        bottom.addWidget(self.btn_sel_none)
+        bottom.addWidget(self.btn_sel_vis)
+        bottom.addSpacing(8)
+        bottom.addWidget(self.count_lbl)
+        bottom.addStretch(1)
+
+        self.btn_append = QPushButton("Append to Shot List")
+        self.btn_replace = QPushButton("Replace Shot List")
+        self.btn_replace.setStyleSheet("font-weight: bold;")
+        self.btn_close = QPushButton("Close")
+        self.btn_append.clicked.connect(lambda: self._emit_import(replace=False))
+        self.btn_replace.clicked.connect(lambda: self._emit_import(replace=True))
+        self.btn_close.clicked.connect(self.accept)
+        bottom.addWidget(self.btn_append)
+        bottom.addWidget(self.btn_replace)
+        bottom.addWidget(self.btn_close)
+        layout.addLayout(bottom)
+
+        self._update_auth_fields()
+        self._set_project_controls_enabled(False)
+
+    def _load_config(self):
+        self.url_edit.setText(self.config.get("url", ""))
+        self.email_edit.setText(self.config.get("email", ""))
+        self.chk_ssl.setChecked(bool(self.config.get("verify_ssl", True)))
+        if self.config.get("auth_mode") == "token":
+            self.rb_token.setChecked(True)
+        else:
+            self.rb_password.setChecked(True)
+
+    def export_config(self) -> dict:
+        tokens = self.client.get_tokens()
+        return {
+            "url": self.url_edit.text().strip(),
+            "email": self.email_edit.text().strip(),
+            "verify_ssl": self.chk_ssl.isChecked(),
+            "auth_mode": "token" if self.rb_token.isChecked() else "password",
+            "session_tokens": tokens if tokens.get("access_token") else None,
+            "project_id": self.cmb_project.currentData() or self.config.get("project_id", ""),
+            "episode_id": self.cmb_episode.currentData() or "",
+            "sequence_id": self.cmb_sequence.currentData() or "",
+        }
+
+    def _update_auth_fields(self):
+        is_token = self.rb_token.isChecked()
+        for w in (self.lbl_email, self.email_edit, self.lbl_pass, self.pass_edit,
+                  self.lbl_totp, self.totp_edit):
+            w.setVisible(not is_token)
+        self.lbl_token.setVisible(is_token)
+        self.token_edit.setVisible(is_token)
+
+    def _set_project_controls_enabled(self, enabled: bool):
+        for w in (self.cmb_project, self.chk_closed, self.btn_refresh,
+                  self.cmb_episode, self.cmb_sequence, self.btn_fetch):
+            w.setEnabled(enabled)
+
+    def _set_busy(self, busy: bool, msg: str = ""):
+        self.btn_connect.setEnabled(not busy)
+        self.btn_fetch.setEnabled(not busy and self.cmb_project.count() > 0)
+        self.btn_refresh.setEnabled(not busy and bool(self.client.access_token))
+        if msg:
+            self.status_lbl.setText(msg)
+            self.status_lbl.setStyleSheet("color: #3aa0ff;")
+
+    def _set_connected_state(self, user: dict | None):
+        name = ""
+        if isinstance(user, dict):
+            name = user.get("full_name") or user.get("email") or "User"
+        self.status_lbl.setText(f"Connected as {name}" if name else "Connected")
+        self.status_lbl.setStyleSheet("color: #5cd67d; font-weight: bold;")
+        self.btn_logout.setEnabled(True)
+        self._set_project_controls_enabled(True)
+
+    def _start_worker(self, action: str, params: dict | None = None):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._set_busy(True, f"Kitsu: {action}...")
+        self._worker = KitsuWorker(self.client, action, params)
+        self._worker.finished_ok.connect(self._on_worker_ok)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.start()
+
+    def _on_connect(self):
+        url = self.url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, APP_NAME, "Enter the Kitsu server URL first.")
+            return
+        if self.rb_token.isChecked():
+            token = self.token_edit.text().strip()
+            if not token:
+                QMessageBox.warning(self, APP_NAME, "Enter your Kitsu API token.")
+                return
+            params = {
+                "url": url,
+                "verify_ssl": self.chk_ssl.isChecked(),
+                "auth_mode": "token",
+                "token": token,
+                "open_only": not self.chk_closed.isChecked(),
+            }
+        else:
+            email = self.email_edit.text().strip()
+            password = self.pass_edit.text()
+            if not email or not password:
+                QMessageBox.warning(self, APP_NAME, "Enter both Kitsu email and password.")
+                return
+            params = {
+                "url": url,
+                "verify_ssl": self.chk_ssl.isChecked(),
+                "auth_mode": "password",
+                "email": email,
+                "password": password,
+                "totp": self.totp_edit.text().strip(),
+                "open_only": not self.chk_closed.isChecked(),
+            }
+        self._start_worker("login", params)
+
+    def _on_logout(self):
+        self.client.logout()
+        self.config["session_tokens"] = None
+        self._projects = []
+        self._episodes = []
+        self._sequences = []
+        self._records = []
+        self.cmb_project.clear()
+        self.cmb_episode.clear()
+        self.cmb_sequence.clear()
+        self.shot_tree.clear()
+        self._update_selected_count()
+        self.btn_logout.setEnabled(False)
+        self._set_project_controls_enabled(False)
+        self.status_lbl.setText("Signed out")
+        self.status_lbl.setStyleSheet("color: #8a8f98;")
+
+    def _on_refresh_projects(self):
+        if not self.client.access_token:
+            return
+        self._start_worker("projects", {"open_only": not self.chk_closed.isChecked()})
+
+    def _on_project_changed(self):
+        project_id = self.cmb_project.currentData()
+        self.cmb_episode.blockSignals(True)
+        self.cmb_episode.clear()
+        self.cmb_episode.blockSignals(False)
+        self.cmb_sequence.clear()
+        if project_id:
+            self._start_worker("hierarchy", {"project_id": project_id})
+
+    def _on_episode_changed(self):
+        ep_id = self.cmb_episode.currentData()
+        self.cmb_sequence.clear()
+        self.cmb_sequence.addItem("All Sequences", "")
+        for seq in self._sequences:
+            if ep_id and seq.get("parent_id") != ep_id:
+                continue
+            self.cmb_sequence.addItem(seq.get("name", ""), seq.get("id", ""))
+
+    def _on_fetch_shots(self):
+        project_id = self.cmb_project.currentData()
+        if not project_id:
+            return
+        self._start_worker(
+            "shots",
+            {
+                "project_id": project_id,
+                "episode_id": self.cmb_episode.currentData() or None,
+                "sequence_id": self.cmb_sequence.currentData() or None,
+            },
+        )
+
+    def _on_worker_ok(self, action: str, payload: dict):
+        self._set_busy(False)
+        if action in ("login", "restore"):
+            self._set_connected_state(payload.get("user"))
+            self._populate_projects(payload.get("projects", []))
+        elif action == "projects":
+            self._set_connected_state(self.client.user)
+            self._populate_projects(payload.get("projects", []))
+        elif action == "hierarchy":
+            self._set_connected_state(self.client.user)
+            self._episodes = payload.get("episodes", [])
+            self._sequences = payload.get("sequences", [])
+            self.cmb_episode.blockSignals(True)
+            self.cmb_episode.clear()
+            self.cmb_episode.addItem("All Episodes", "")
+            for ep in self._episodes:
+                self.cmb_episode.addItem(ep.get("name", ""), ep.get("id", ""))
+            self.cmb_episode.setEnabled(bool(self._episodes))
+            saved_ep = self.config.get("episode_id", "")
+            if saved_ep:
+                idx = self.cmb_episode.findData(saved_ep)
+                if idx >= 0:
+                    self.cmb_episode.setCurrentIndex(idx)
+            self.cmb_episode.blockSignals(False)
+            self._on_episode_changed()
+            saved_seq = self.config.get("sequence_id", "")
+            if saved_seq:
+                idx = self.cmb_sequence.findData(saved_seq)
+                if idx >= 0:
+                    self.cmb_sequence.setCurrentIndex(idx)
+        elif action == "shots":
+            self._set_connected_state(self.client.user)
+            self._records = payload.get("shots", [])
+            self._populate_shots()
+
+    def _on_worker_failed(self, action: str, message: str):
+        self._set_busy(False)
+        if action == "restore":
+            self.status_lbl.setText("Saved session expired — please sign in")
+            self.status_lbl.setStyleSheet("color: #ff9f43;")
+            return
+        self.status_lbl.setText(message)
+        self.status_lbl.setStyleSheet("color: #ff4d4d;")
+
+    def _populate_projects(self, projects: list[dict]):
+        self._projects = projects
+        self.cmb_project.blockSignals(True)
+        self.cmb_project.clear()
+        for prj in projects:
+            self.cmb_project.addItem(prj.get("name", ""), prj.get("id", ""))
+        saved_id = self.config.get("project_id", "")
+        if saved_id:
+            idx = self.cmb_project.findData(saved_id)
+            if idx >= 0:
+                self.cmb_project.setCurrentIndex(idx)
+        self.cmb_project.blockSignals(False)
+        self._on_project_changed()
+
+    @staticmethod
+    def _task_status_for(rec: dict, col_name: str) -> str:
+        tasks = rec.get("tasks") or {}
+        wanted = col_name.lower()
+        for tname, tinfo in tasks.items():
+            if tname.lower() == wanted:
+                return str(tinfo.get("status") or tinfo.get("status_short") or "")
+        return ""
+
+    def _populate_task_filters(self):
+        assignees: set[str] = set()
+        prep_statuses: set[str] = set()
+        comp_statuses: set[str] = set()
+        other_cols: set[str] = set()
+
+        for rec in self._records:
+            for a in rec.get("assignees") or []:
+                if a:
+                    assignees.add(str(a))
+            for tname, tinfo in (rec.get("tasks") or {}).items():
+                st = str(tinfo.get("status") or tinfo.get("status_short") or "").strip()
+                low = tname.lower()
+                if low == "prepare" and st:
+                    prep_statuses.add(st)
+                elif low == "compositing" and st:
+                    comp_statuses.add(st)
+                else:
+                    other_cols.add(tname)
+
+        def _refill(cmb: QComboBox, items: list[tuple[str, str]]):
+            prev = cmb.currentData()
+            cmb.blockSignals(True)
+            cmb.clear()
+            for label, val in items:
+                cmb.addItem(label, val)
+            if prev:
+                idx = cmb.findData(prev)
+                if idx >= 0:
+                    cmb.setCurrentIndex(idx)
+            cmb.blockSignals(False)
+
+        assignee_items = [("All Assignees", ""), ("Assigned to Me", "__ME__"), ("Unassigned", "__NONE__")]
+        assignee_items.extend((a, a) for a in sorted(assignees, key=str.lower))
+        _refill(self.cmb_assignee, assignee_items)
+        _refill(self.cmb_prepare, [("All", "")] + [(s, s) for s in sorted(prep_statuses, key=str.lower)])
+        _refill(self.cmb_compositing, [("All", "")] + [(s, s) for s in sorted(comp_statuses, key=str.lower)])
+        _refill(self.cmb_other_col, [("Any Column", "")] + [(c, c) for c in sorted(other_cols, key=str.lower)])
+        self._on_other_col_changed()
+
+    def _on_other_col_changed(self):
+        col = self.cmb_other_col.currentData() or ""
+        statuses: set[str] = set()
+        for rec in self._records:
+            if col:
+                st = self._task_status_for(rec, col)
+                if st:
+                    statuses.add(st)
+            else:
+                for tname, tinfo in (rec.get("tasks") or {}).items():
+                    if tname.lower() not in ("prepare", "compositing"):
+                        st = str(tinfo.get("status") or "").strip()
+                        if st:
+                            statuses.add(st)
+        self.cmb_other_status.blockSignals(True)
+        self.cmb_other_status.clear()
+        self.cmb_other_status.addItem("All", "")
+        for s in sorted(statuses, key=str.lower):
+            self.cmb_other_status.addItem(s, s)
+        self.cmb_other_status.blockSignals(False)
+        self._apply_filter()
+
+    def _populate_shots(self):
+        self._populate_task_filters()
+        self.shot_tree.blockSignals(True)
+        self.shot_tree.clear()
+        for idx, rec in enumerate(self._records):
+            frames = rec.get("frames")
+            info_parts = []
+            if rec.get("fps"):
+                info_parts.append(f"{rec['fps']} fps")
+            if rec.get("resolution"):
+                info_parts.append(str(rec["resolution"]))
+            assignees_text = ", ".join(rec.get("assignees") or [])
+            prep_text = self._task_status_for(rec, "Prepare")
+            comp_text = self._task_status_for(rec, "Compositing")
+            item = QTreeWidgetItem([
+                rec.get("name", ""),
+                rec.get("episode", ""),
+                rec.get("sequence", ""),
+                frames_text(frames),
+                assignees_text,
+                prep_text,
+                comp_text,
+                "  ".join(info_parts),
+            ])
+            other_tip = [
+                f"{tname}: {tinfo.get('status', '')}"
+                for tname, tinfo in sorted((rec.get("tasks") or {}).items())
+            ]
+            if other_tip:
+                item.setToolTip(0, "\n".join(other_tip))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setData(0, ROLE_INDEX, idx)
+            self.shot_tree.addTopLevelItem(item)
+        self.shot_tree.blockSignals(False)
+        self._apply_filter()
+        self._update_selected_count()
+
+    def _apply_filter(self):
+        needle = self.search_edit.text().strip().lower()
+        assignee_flt = self.cmb_assignee.currentData() or ""
+        prep_flt = self.cmb_prepare.currentData() or ""
+        comp_flt = self.cmb_compositing.currentData() or ""
+        other_col = self.cmb_other_col.currentData() or ""
+        other_status = self.cmb_other_status.currentData() or ""
+        me_id = str((self.client.user or {}).get("id") or "")
+        me_name = str((self.client.user or {}).get("full_name") or "").lower()
+
+        for i in range(self.shot_tree.topLevelItemCount()):
+            item = self.shot_tree.topLevelItem(i)
+            idx = item.data(0, ROLE_INDEX)
+            rec = self._records[idx] if isinstance(idx, int) and idx < len(self._records) else {}
+            hidden = False
+
+            if needle:
+                haystack = " ".join(item.text(c).lower() for c in (0, 1, 2, 4, 5, 6))
+                if needle not in haystack:
+                    hidden = True
+
+            if not hidden and assignee_flt:
+                rec_assignees = rec.get("assignees") or []
+                rec_ids = rec.get("assignee_ids") or []
+                if assignee_flt == "__NONE__":
+                    hidden = bool(rec_assignees)
+                elif assignee_flt == "__ME__":
+                    hidden = not (
+                        (me_id and me_id in rec_ids)
+                        or (me_name and any(a.lower() == me_name for a in rec_assignees))
+                    )
+                else:
+                    hidden = assignee_flt not in rec_assignees
+
+            if not hidden and prep_flt:
+                hidden = self._task_status_for(rec, "Prepare") != prep_flt
+
+            if not hidden and comp_flt:
+                hidden = self._task_status_for(rec, "Compositing") != comp_flt
+
+            if not hidden and (other_col or other_status):
+                tasks = rec.get("tasks") or {}
+                if other_col:
+                    st = self._task_status_for(rec, other_col)
+                    hidden = (st != other_status) if other_status else (other_col not in tasks)
+                else:
+                    hidden = not any(
+                        tname.lower() not in ("prepare", "compositing")
+                        and str(tinfo.get("status") or "") == other_status
+                        for tname, tinfo in tasks.items()
+                    )
+
+            item.setHidden(hidden)
+
+    def _set_checks(self, checked: bool, visible_only: bool):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.shot_tree.blockSignals(True)
+        for i in range(self.shot_tree.topLevelItemCount()):
+            item = self.shot_tree.topLevelItem(i)
+            if visible_only and item.isHidden():
+                continue
+            item.setCheckState(0, state)
+        self.shot_tree.blockSignals(False)
+        self._update_selected_count()
+
+    def _update_selected_count(self, *_):
+        total = self.shot_tree.topLevelItemCount()
+        selected = sum(
+            1
+            for i in range(total)
+            if self.shot_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked
+        )
+        self.count_lbl.setText(f"{selected} / {total} selected")
+        self.btn_append.setEnabled(selected > 0)
+        self.btn_replace.setEnabled(selected > 0)
+
+    def _emit_import(self, replace: bool):
+        chosen = []
+        for i in range(self.shot_tree.topLevelItemCount()):
+            item = self.shot_tree.topLevelItem(i)
+            if item.checkState(0) == Qt.CheckState.Checked:
+                idx = item.data(0, ROLE_INDEX)
+                if isinstance(idx, int) and 0 <= idx < len(self._records):
+                    chosen.append(self._records[idx])
+        if not chosen:
+            return
+        prj_name = self.cmb_project.currentText() or "Kitsu"
+        prj_id = str(self.cmb_project.currentData() or "")
+        self.import_requested.emit(chosen, replace, prj_name, prj_id)
+        self.accept()
+
+
+class KitsuPublishWorker(QThread):
+    """Update a shot's Compositing status to ĐợiCheck + post path & frame-1 JPG."""
+
+    done = Signal(str, str)     # shot_name, log_message
+    failed = Signal(str, str)   # shot_name, error_message
+
+    def __init__(
+        self,
+        client: kitsu_client.KitsuClient,
+        project_id: str,
+        shot: Shot,
+        dest_path: str,
+        source_files: list[Path],
+    ):
+        super().__init__()
+        self.client = client
+        self.project_id = project_id
+        self.shot = shot
+        self.dest_path = dest_path
+        self.source_files = source_files
+
+    def run(self):
+        tmp_jpg: Path | None = None
+        try:
+            shot_id = self.shot.kitsu_id
+            if not shot_id:
+                for rec in self.client.get_shots(self.project_id, include_tasks=False):
+                    converted = shots_from_kitsu([rec])
+                    if rec.get("name") == self.shot.name or (converted and converted[0].name == self.shot.name):
+                        shot_id = str(rec.get("id") or "")
+                        break
+            if not shot_id:
+                raise kitsu_client.KitsuError("Shot not found in Kitsu project.")
+
+            with tempfile.TemporaryDirectory(prefix="dkt_thumb_") as td:
+                candidate = Path(td) / f"{self.shot.name}_frame1.jpg"
+                tmp_jpg = shot_import.capture_first_frame_jpg(self.source_files, candidate)
+                self.client.update_shot_task_on_publish(
+                    project_id=self.project_id,
+                    shot_id=shot_id,
+                    dest_path=self.dest_path,
+                    task_type_name="Compositing",
+                    status_name="ĐợiCheck",
+                    attachment_path=tmp_jpg,
+                )
+            attach_note = " + frame 1 JPG" if tmp_jpg else ""
+            self.done.emit(
+                self.shot.name,
+                f"Kitsu updated: {self.shot.name} Compositing -> ĐợiCheck (comment path{attach_note})",
+            )
+        except Exception as exc:
+            self.failed.emit(self.shot.name, f"Kitsu update failed for {self.shot.name}: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1385,6 +2198,10 @@ class MainWindow(QMainWindow):
         self._preview_timer.timeout.connect(self._run_preview_search)
         self._scanning = False
         self._running = False
+        self._kitsu_client = kitsu_client.KitsuClient()
+        self._kitsu_config: dict = {}
+        self._kitsu_project_id: str = ""
+        self._kitsu_pub_workers: list = []
         self._build_ui()
         self._update_previews()
         self._update_controls()
@@ -1471,6 +2288,12 @@ class MainWindow(QMainWindow):
         self.chk_dailies = QCheckBox("MAKE DAILIES FOLDER")
         self.chk_dailies.toggled.connect(self._update_previews)
         pv.addWidget(self.chk_dailies)
+        self.chk_kitsu_publish = QCheckBox("UPDATE KITSU (ĐợiCheck)")
+        self.chk_kitsu_publish.setChecked(True)
+        self.chk_kitsu_publish.setToolTip(
+            "After PUBLISH, set Kitsu Compositing to ĐợiCheck, post destination path, and attach frame 1 JPG."
+        )
+        pv.addWidget(self.chk_kitsu_publish)
         self.publish_checks = self._type_checks(PUBLISH_TYPE_KEYS, pv)
         pv.addStretch(1)
         row.addWidget(publish_box, 1)
@@ -1524,9 +2347,21 @@ class MainWindow(QMainWindow):
         # Right column: SHOTS LIST
         right = QVBoxLayout()
         body.addLayout(right, 1)
+        title_row = QHBoxLayout()
         title = QLabel("SHOTS LIST")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        right.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.kitsu_status_lbl = QLabel("Kitsu: not connected")
+        self.kitsu_status_lbl.setStyleSheet("color: #8a8f98; font-size: 11px;")
+        self.btn_kitsu = QPushButton("KITSU...")
+        self.btn_kitsu.setMinimumHeight(28)
+        self.btn_kitsu.setToolTip("Connect to a Kitsu server and fetch shots directly")
+        self.btn_kitsu.clicked.connect(self.open_kitsu_dialog)
+        title_row.addWidget(self.kitsu_status_lbl)
+        title_row.addSpacing(8)
+        title_row.addWidget(self.btn_kitsu)
+        right.addLayout(title_row)
         self.tree = ShotTree()
         self.tree.setHeaderLabels(["NO", "SEQ", "NAME", "VERSION", "FRAMES", "STATUS"])
         self.tree.setRootIsDecorated(True)
@@ -1552,6 +2387,9 @@ class MainWindow(QMainWindow):
         self.btn_info.clicked.connect(self.show_about)
         self.btn_add = QPushButton("ADD")
         add_menu = QMenu(self.btn_add)
+        add_menu.addAction("Fetch from Kitsu...", self.open_kitsu_dialog)
+        add_menu.addAction("Import CSV / Excel / Image...", self.browse_csv)
+        add_menu.addSeparator()
         add_menu.addAction("Add shot folder...", self.add_folder_shot)
         add_menu.addAction("Add shot by name...", self.add_named_shot)
         self.btn_add.setMenu(add_menu)
@@ -1677,21 +2515,28 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(self._running)
         self.btn_clear.setEnabled(not busy)
         self.btn_remove.setEnabled(not busy)
+        self.btn_kitsu.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
                   self.spin_threads,
-                  self.chk_dailies, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
+                  self.chk_dailies, self.chk_kitsu_publish, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
                   *self.local_checks.values(), *self.publish_checks.values()):
             w.setEnabled(not self._running)
 
-    # ---------- CSV and shot list ----------
+    # ---------- CSV / Excel / Image and shot list ----------
     def browse_csv(self):
         if self._busy():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open Kitsu CSV", "",
-                                              "CSV files (*.csv);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Shot List (CSV, Excel, Image)",
+            "",
+            "Shot Lists (*.csv *.xlsx *.xlsm *.xls *.png *.jpg *.jpeg);;"
+            "CSV files (*.csv);;Excel files (*.xlsx *.xlsm *.xls);;"
+            "Images (*.png *.jpg *.jpeg);;All files (*)",
+        )
         if path:
-            self.load_csv_path(Path(path), replace=True)
+            self.load_import_path(Path(path), replace=True)
 
     def browse_dir(self, edit: PathEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select folder", edit.text().strip())
@@ -1714,25 +2559,78 @@ class MainWindow(QMainWindow):
         self.path_history.insert(0, text)
         del self.path_history[PATH_HISTORY_MAX:]
 
-    def load_csv_path(self, path: Path, replace: bool):
-        if self._busy():
-            self.log("Cannot load a CSV while scanning or copying.")
-            return
-        try:
-            new_shots = load_csv(path)
-        except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Could not read CSV:\n{exc}")
-            return
+    def _apply_loaded_shots(self, new_shots: list, replace: bool, source_desc: str):
         if replace:
             self.shots = new_shots
             self.scan_config = None
             self.current_mode = MODE_LOCAL
+            added = len(new_shots)
         else:
             known = {s.name for s in self.shots}
-            self.shots.extend(s for s in new_shots if s.name not in known)
-        self.log(f"Loaded {len(new_shots)} shot(s) from {path.name}")
+            fresh = [s for s in new_shots if s.name not in known]
+            self.shots.extend(fresh)
+            added = len(fresh)
+        self.log(f"Loaded {added} shot(s) from {source_desc}")
         self.refresh_tree()
         self._update_previews()
+
+    def load_csv_path(self, path: Path, replace: bool):
+        self.load_import_path(path, replace=replace)
+
+    def load_import_path(self, path: Path, replace: bool):
+        if self._busy():
+            self.log("Cannot load a shot list while scanning or copying.")
+            return
+        ext = path.suffix.lower()
+        try:
+            if ext == ".csv":
+                new_shots = load_csv(path)
+            elif ext in (".xlsx", ".xlsm", ".xls"):
+                rows = shot_import.read_excel_rows(path)
+                recs = shot_import.parse_shots_from_table(rows)
+                new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
+            elif ext in (".png", ".jpg", ".jpeg"):
+                text = shot_import.extract_text_from_image(path)
+                recs = shot_import.parse_shots_from_text(text)
+                if not recs:
+                    raise ValueError("No shot names were recognized in this image.")
+                new_shots = [Shot(name=r["name"], frames=r["frames"], seq=r.get("seq", "")) for r in recs]
+            else:
+                raise ValueError(f"Unsupported file type: {ext}")
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not read {path.name}:\n{exc}")
+            return
+        self._apply_loaded_shots(new_shots, replace=replace, source_desc=path.name)
+
+    def _update_kitsu_badge(self):
+        user = self._kitsu_client.user
+        if user and self._kitsu_client.access_token:
+            name = user.get("full_name") or user.get("email") or "Connected"
+            self.kitsu_status_lbl.setText(f"Kitsu: {name}")
+            self.kitsu_status_lbl.setStyleSheet("color: #5cd67d; font-size: 11px;")
+        elif self._kitsu_config.get("url"):
+            self.kitsu_status_lbl.setText("Kitsu: saved server")
+            self.kitsu_status_lbl.setStyleSheet("color: #8a8f98; font-size: 11px;")
+        else:
+            self.kitsu_status_lbl.setText("Kitsu: not connected")
+            self.kitsu_status_lbl.setStyleSheet("color: #8a8f98; font-size: 11px;")
+
+    def open_kitsu_dialog(self):
+        if self._busy():
+            self.log("Wait for the current scan or copy to finish before fetching from Kitsu.")
+            return
+        dlg = KitsuDialog(self._kitsu_client, self._kitsu_config, parent=self)
+        dlg.import_requested.connect(self._on_kitsu_import)
+        dlg.exec()
+        self._kitsu_config = dlg.export_config()
+        self._update_kitsu_badge()
+        self.save_session()
+
+    def _on_kitsu_import(self, records: list, replace: bool, project_name: str, project_id: str = ""):
+        if project_id:
+            self._kitsu_project_id = project_id
+        new_shots = shots_from_kitsu(records)
+        self._apply_loaded_shots(new_shots, replace=replace, source_desc=f"Kitsu ({project_name})")
 
     def on_tree_dropped(self, paths: list):
         if self._scanning:
@@ -1747,8 +2645,8 @@ class MainWindow(QMainWindow):
                 self.shots.append(Shot(name=p.name, frames=frames))
                 known.add(p.name)
                 self.log(f"Added shot folder {p.name} ({frames} frames)")
-            elif p.suffix.lower() == ".csv":
-                self.load_csv_path(p, replace=False)
+            elif p.suffix.lower() in (".csv", ".xlsx", ".xlsm", ".xls", ".png", ".jpg", ".jpeg"):
+                self.load_import_path(p, replace=False)
         self.refresh_tree()
         self._update_previews()
 
@@ -2223,6 +3121,46 @@ class MainWindow(QMainWindow):
         label = {"done": "done", "partial": "stopped", "error": "finished with errors"}.get(result, result)
         self._set_log_line(self._progress_block,
                            f"{self._progress_prefix} ({shot.done}/{self._progress_total} file(s)) - {label}")
+        if (
+            result == "done"
+            and self.current_mode == MODE_PUBLISH
+            and self.chk_kitsu_publish.isChecked()
+            and self._kitsu_client.access_token
+        ):
+            self._queue_kitsu_publish_update(shot)
+
+    def _queue_kitsu_publish_update(self, shot: Shot):
+        project_id = self._kitsu_project_id or self._kitsu_config.get("project_id", "")
+        if not project_id:
+            self.log(f"Kitsu skip ({shot.name}): no Kitsu project selected.", C_ORANGE)
+            return
+        if not shot.scan or not shot.scan.units:
+            return
+        unit = shot.scan.units[0]
+        dest_base = Path(shot.scan.dest) if shot.scan.dest else None
+        if dest_base is None:
+            paste_to = self._paste_to()
+            if paste_to is None:
+                return
+            dailies = self._dailies_name() if self.chk_dailies.isChecked() else ""
+            dest_base = destination_base(paste_to, MODE_PUBLISH, dailies)
+        dest_path = str(dest_base / unit.path.name)
+
+        worker = KitsuPublishWorker(
+            client=self._kitsu_client,
+            project_id=project_id,
+            shot=shot,
+            dest_path=dest_path,
+            source_files=list(unit.copy_files),
+        )
+        worker.done.connect(lambda _name, msg: self.log(msg))
+        worker.failed.connect(lambda _name, msg: self.log(msg, C_ORANGE))
+        worker.finished.connect(
+            lambda w=worker: self._kitsu_pub_workers.remove(w)
+            if w in self._kitsu_pub_workers else None
+        )
+        self._kitsu_pub_workers.append(worker)
+        worker.start()
 
     def _on_worker_finished(self):
         stopped = self.worker.stop_event.is_set() if self.worker else False
@@ -2244,14 +3182,17 @@ class MainWindow(QMainWindow):
             "local_types": [k for k, cb in self.local_checks.items() if cb.isChecked()],
             "publish_types": [k for k, cb in self.publish_checks.items() if cb.isChecked()],
             "dailies": self.chk_dailies.isChecked(),
+            "kitsu_publish": self.chk_kitsu_publish.isChecked(),
             "overwrite": self.chk_overwrite.isChecked(),
             "skip_system": self.chk_skip_sys.isChecked(),
             "threads": self.spin_threads.value(),
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            "kitsu": self._kitsu_config,
+            "kitsu_project_id": self._kitsu_project_id,
             "shots": [
                 {"name": s.name, "frames": s.frames, "seq": s.seq, "state": s.state,
                  "done": s.done, "force_overwrite": s.force_overwrite,
-                 "force_copy": s.force_copy}
+                 "force_copy": s.force_copy, "kitsu_id": s.kitsu_id}
                 for s in self.shots
             ],
             "log": self.log_view.toPlainText(),
@@ -2286,6 +3227,7 @@ class MainWindow(QMainWindow):
         for key, cb in self.publish_checks.items():
             cb.setChecked(key in data.get("publish_types", []))
         self.chk_dailies.setChecked(bool(data.get("dailies", False)))
+        self.chk_kitsu_publish.setChecked(bool(data.get("kitsu_publish", True)))
         self.chk_skip_sys.setChecked(bool(data.get("skip_system", True)))
         self.spin_threads.setValue(int(data.get("threads", MAX_WORKERS)))
         if data.get("overwrite"):
@@ -2302,7 +3244,8 @@ class MainWindow(QMainWindow):
             frames = item.get("frames")
             shot = Shot(name=str(item["name"]),
                         frames=None if frames is None else int(frames),
-                        seq=str(item.get("seq", "")))
+                        seq=str(item.get("seq", "")),
+                        kitsu_id=str(item.get("kitsu_id", "")))
             state = item.get("state", "new")
             if state == "copying":          # app was closed mid-copy: resume with overwrite
                 state = "partial"
@@ -2317,6 +3260,11 @@ class MainWindow(QMainWindow):
         log_text = data.get("log", "")
         if log_text:
             self.log_view.setPlainText(log_text)
+        kitsu_cfg = data.get("kitsu")
+        if isinstance(kitsu_cfg, dict):
+            self._kitsu_config = kitsu_cfg
+        self._kitsu_project_id = str(data.get("kitsu_project_id") or self._kitsu_config.get("project_id") or "")
+        self._update_kitsu_badge()
         self.refresh_tree()
         self._update_previews()
         return True

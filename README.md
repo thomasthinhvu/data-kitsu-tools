@@ -88,6 +88,12 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-20]
+  - **Version 2.0.0:**
+    - **Direct Kitsu integration (`KITSU...`):** connect to a Kitsu server via Email/Password (with optional 2FA) or API Token, browse Projects, Episodes, Sequences, and fetch shots directly into the shot list without exporting a CSV first.
+    - **Task & assignment filters:** filter fetched Kitsu shots by **Assignations**, **Prepare**, **Compositing**, and any other project task column/status, plus live text search.
+    - **Auto-update Kitsu on PUBLISH (`UPDATE KITSU (ĐợiCheck)`):** after a shot finishes publishing, automatically change its `Compositing` task status to `ĐợiCheck`, post a comment containing the destination path, and capture frame 1 as a `.jpg` attachment.
+    - **Excel & Image OCR shot-list import:** drag and drop or browse `.xlsx` / `.xlsm` / `.xls` spreadsheets and `.png` / `.jpg` screenshots to automatically extract shot names, sequences, and frame counts (supports `start-end` ranges, `start`/`end` columns, `Scene`/`Phase` section headers, and varied naming conventions).
 - [26-11-19]
   - **Version 1.23:** each row of the recent-path list turns blue while the mouse is over it.
   - **Version 1.22:** the ▾ buttons next to the COPY FROM and PASTE TO "..." buttons are removed. The recent-path list opens by clicking the field. A path box is highlighted in blue while a folder is dragged over it.

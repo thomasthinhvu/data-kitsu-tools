@@ -96,6 +96,12 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-20]
+  - **Version 2.0.0:**
+    - **Kết nối Kitsu trực tiếp (`KITSU...`):** đăng nhập server Kitsu bằng Email/Password (hỗ trợ 2FA) hoặc API Token, duyệt Project, Episode, Sequence và nạp danh sách shot trực tiếp không cần xuất CSV thủ công.
+    - **Bộ lọc task & người làm:** lọc shot trong Kitsu theo **Assignations**, **Prepare**, **Compositing** và các cột task khác trong project, kết hợp tìm kiếm nhanh.
+    - **Tự động cập nhật Kitsu sau PUBLISH (`UPDATE KITSU (ĐợiCheck)`):** sau khi PUBLISH xong một shot, tự động đổi trạng thái cột `Compositing` sang `ĐợiCheck`, post comment kèm đường dẫn đích của shot và chụp frame 1 chuyển sang `.jpg` đính kèm vào comment.
+    - **Import Excel & Ảnh chụp (OCR):** hỗ trợ kéo thả hoặc chọn file `.xlsx` / `.xlsm` / `.xls` và ảnh `.png` / `.jpg` để tự trích xuất tên shot, sequence và số frame (hỗ trợ cả dạng range `1-286`, cặp cột `start`/`end frame`, dòng tiêu đề `Scene`/`Phase` và nhiều quy tắc đặt tên shot).
 - [26-11-19]
   - **Version 1.23:** mỗi dòng trong danh sách đường dẫn gần đây sẽ đổi sang màu xanh khi rê chuột qua.
   - **Version 1.22:** bỏ hai nút ▾ cạnh nút "..." của COPY FROM và PASTE TO. Danh sách đường dẫn gần đây mở bằng cách bấm vào ô. Khi kéo một thư mục qua ô đường dẫn, ô sẽ được tô viền xanh.
