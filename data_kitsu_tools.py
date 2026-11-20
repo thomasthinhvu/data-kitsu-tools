@@ -2077,6 +2077,14 @@ class KitsuDialog(QDialog):
 
             item.setHidden(hidden)
 
+        # Auto-sync selection to visible (filtered) shots so hidden shots are not imported
+        self.shot_tree.blockSignals(True)
+        for i in range(self.shot_tree.topLevelItemCount()):
+            it = self.shot_tree.topLevelItem(i)
+            it.setCheckState(0, Qt.CheckState.Unchecked if it.isHidden() else Qt.CheckState.Checked)
+        self.shot_tree.blockSignals(False)
+        self._update_selected_count()
+
     def _set_checks(self, checked: bool, visible_only: bool):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         self.shot_tree.blockSignals(True)
@@ -2090,12 +2098,18 @@ class KitsuDialog(QDialog):
 
     def _update_selected_count(self, *_):
         total = self.shot_tree.topLevelItemCount()
-        selected = sum(
-            1
-            for i in range(total)
-            if self.shot_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked
-        )
-        self.count_lbl.setText(f"{selected} / {total} selected")
+        visible = 0
+        selected = 0
+        for i in range(total):
+            it = self.shot_tree.topLevelItem(i)
+            if not it.isHidden():
+                visible += 1
+            if it.checkState(0) == Qt.CheckState.Checked:
+                selected += 1
+        if visible < total:
+            self.count_lbl.setText(f"{selected} / {visible} filtered ({total} total)")
+        else:
+            self.count_lbl.setText(f"{selected} / {total} selected")
         self.btn_append.setEnabled(selected > 0)
         self.btn_replace.setEnabled(selected > 0)
 
