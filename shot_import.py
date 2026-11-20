@@ -396,15 +396,16 @@ def read_excel_rows(path: Path) -> list[list[str]]:
 
 
 def _prepare_ocr_image(src: Path, dst: Path) -> Path:
-    """Normalize pixel format and upscale small screenshots for better OCR."""
+    """Normalize pixel format, upscale small screenshots, and convert to clean grayscale for OCR."""
     img = QImage(str(src))
     if img.isNull():
         return src
-    if img.width() < 1200:
-        img = img.scaledToWidth(img.width() * 2, Qt.TransformationMode.SmoothTransformation)
+    if img.width() < 1400:
+        scale = 3 if img.width() < 700 else 2
+        img = img.scaledToWidth(img.width() * scale, Qt.TransformationMode.SmoothTransformation)
     elif img.width() > 3800:
         img = img.scaledToWidth(3800, Qt.TransformationMode.SmoothTransformation)
-    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    img = img.convertToFormat(QImage.Format.Format_Grayscale8).convertToFormat(QImage.Format.Format_ARGB32)
     if img.save(str(dst), "PNG"):
         return dst
     return src

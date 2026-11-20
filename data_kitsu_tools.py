@@ -40,6 +40,7 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QImage, QKey
 from PySide6.QtWidgets import QFrame
 from PySide6.QtWidgets import QTabWidget, QTextBrowser
 import kitsu_client
+import retro_sfx
 import shot_import
 import updater  # stdlib helper next to this file: GitHub version check and update
 from PySide6.QtWidgets import (
@@ -2339,6 +2340,7 @@ class MainWindow(QMainWindow):
         self._kitsu_config: dict = {}
         self._kitsu_project_id: str = ""
         self._kitsu_pub_workers: list = []
+        self._sfx = retro_sfx.RetroSfx(self)
         self._build_ui()
         self._update_previews()
         self._update_controls()
@@ -2396,6 +2398,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.paste_edit, 2, 1)
         grid.addWidget(self.paste_btn, 2, 2)
         grid.addWidget(self.paste_preview, 3, 1, 1, 2)
+        self.btn_swap = QPushButton("⇅")
+        self.btn_swap.setFixedSize(36, path_height * 2 + 18)
+        self.btn_swap.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.btn_swap.setToolTip("Swap COPY FROM and PASTE TO paths")
+        self.btn_swap.clicked.connect(self.swap_paths)
+        grid.addWidget(self.btn_swap, 0, 3, 3, 1)
         left.addWidget(paths_box)
         self.copy_edit.textChanged.connect(self._update_previews)
         self.paste_edit.textChanged.connect(self._update_previews)
@@ -2406,36 +2414,44 @@ class MainWindow(QMainWindow):
         row.setSpacing(12)
         left.addLayout(row)
 
-        # LOCAL box
-        local_box = QGroupBox()
-        lv = QVBoxLayout(local_box)
-        lv.setSpacing(10)
-        self.btn_local = self._mode_button("LOCAL")
-        self.btn_local.clicked.connect(lambda: self.start_scan(MODE_LOCAL))
-        lv.addWidget(self.btn_local)
-        self.local_checks = self._type_checks(LOCAL_TYPE_KEYS, lv)
-        lv.addStretch(1)
-        row.addWidget(local_box, 1)
+        # Unified SCAN box (replaces separate LOCAL and PUBLISH buttons)
+        scan_box = QGroupBox()
+        sv = QVBoxLayout(scan_box)
+        sv.setSpacing(8)
+        self.btn_scan = self._mode_button("SCAN")
+        self.btn_scan.clicked.connect(lambda: self.start_scan(self._effective_mode()))
+        sv.addWidget(self.btn_scan)
 
-        # PUBLISH box
-        publish_box = QGroupBox()
-        pv = QVBoxLayout(publish_box)
-        pv.setSpacing(10)
-        self.btn_publish = self._mode_button("PUBLISH")
-        self.btn_publish.clicked.connect(lambda: self.start_scan(MODE_PUBLISH))
-        pv.addWidget(self.btn_publish)
         self.chk_dailies = QCheckBox("MAKE DAILIES FOLDER")
         self.chk_dailies.toggled.connect(self._update_previews)
-        pv.addWidget(self.chk_dailies)
+        sv.addWidget(self.chk_dailies)
+
+        self.chk_consistent_path = QCheckBox("Consitant path")
+        self.chk_consistent_path.setToolTip(
+            "Preserve source folder & subpath structure (like LOCAL mode), "
+            "mirroring subpaths from COPY FROM to PASTE TO."
+        )
+        self.chk_consistent_path.toggled.connect(self._on_consistent_toggled)
+        sv.addWidget(self.chk_consistent_path)
+
         self.chk_kitsu_publish = QCheckBox("UPDATE KITSU (ĐợiCheck)")
         self.chk_kitsu_publish.setChecked(True)
         self.chk_kitsu_publish.setToolTip(
             "After PUBLISH, set Kitsu Compositing to ĐợiCheck, post destination path, and attach frame 1 JPG."
         )
-        pv.addWidget(self.chk_kitsu_publish)
-        self.publish_checks = self._type_checks(PUBLISH_TYPE_KEYS, pv)
-        pv.addStretch(1)
-        row.addWidget(publish_box, 1)
+        sv.addWidget(self.chk_kitsu_publish)
+
+        types_grid = QGridLayout()
+        types_grid.setSpacing(6)
+        self.scan_checks: dict = {}
+        for idx, key in enumerate(LOCAL_TYPE_KEYS):
+            cb = QCheckBox(key)
+            cb.setChecked(key == "EXR")
+            self.scan_checks[key] = cb
+            types_grid.addWidget(cb, idx // 2, idx % 2)
+        sv.addLayout(types_grid)
+        sv.addStretch(1)
+        row.addWidget(scan_box, 1)
 
         # COPY MODE box
         mode_box = QGroupBox()
@@ -2450,9 +2466,13 @@ class MainWindow(QMainWindow):
         self.chk_overwrite = QCheckBox("OVERWRITE")
         self.chk_skip_sys = QCheckBox("SKIP SYSTEM FILES")
         self.chk_skip_sys.setChecked(True)
+        self.chk_sound = QCheckBox("8-BIT SOUND")
+        self.chk_sound.setChecked(True)
+        self.chk_sound.toggled.connect(self._on_sound_toggled)
         mv.addWidget(self.chk_skip)
         mv.addWidget(self.chk_overwrite)
         mv.addWidget(self.chk_skip_sys)
+        mv.addWidget(self.chk_sound)
         thread_row = QHBoxLayout()
         thread_row.addWidget(QLabel("THREADS / SHOT"))
         self.spin_threads = QSpinBox()
@@ -2624,10 +2644,32 @@ class MainWindow(QMainWindow):
         text = self.paste_edit.text().strip().strip('"').strip()
         return Path(text) if text else None
 
+    def _effective_mode(self) -> str:
+        return MODE_LOCAL if self.chk_consistent_path.isChecked() else MODE_PUBLISH
+
+    def _on_consistent_toggled(self, checked: bool):
+        self.current_mode = MODE_LOCAL if checked else MODE_PUBLISH
+        self.chk_dailies.setEnabled(not checked and not self._running)
+        self.chk_kitsu_publish.setEnabled(not checked and not self._running)
+        self._update_previews()
+
+    def _on_sound_toggled(self, checked: bool):
+        self._sfx.enabled = checked
+
+    def swap_paths(self):
+        if self._running:
+            return
+        src = self.copy_edit.text()
+        dst = self.paste_edit.text()
+        self.copy_edit.setText(dst)
+        self.paste_edit.setText(src)
+        self._preview_cache.clear()
+        self._update_previews()
+        self.log("Swapped COPY FROM and PASTE TO paths.")
+
     def _selected_exts(self, mode: str) -> tuple:
-        checks = self.local_checks if mode == MODE_LOCAL else self.publish_checks
         exts = set()
-        for key, cb in checks.items():
+        for key, cb in self.scan_checks.items():
             if cb.isChecked():
                 exts.update(FILE_TYPES[key])
         return tuple(sorted(exts))      # empty tuple = every file type
@@ -2648,8 +2690,7 @@ class MainWindow(QMainWindow):
 
     def _update_controls(self):
         busy = self._busy()
-        self.btn_local.setEnabled(not busy)
-        self.btn_publish.setEnabled(not busy)
+        self.btn_scan.setEnabled(not busy)
         self.btn_start.setEnabled(not busy)
         self.btn_pause.setEnabled(self._running)
         self.btn_stop.setEnabled(self._running)
@@ -2657,11 +2698,15 @@ class MainWindow(QMainWindow):
         self.btn_remove.setEnabled(not busy)
         self.btn_kitsu.setEnabled(not busy)
         self.btn_add.setEnabled(not self._scanning)
+        self.btn_swap.setEnabled(not self._running)
+        consistent = self.chk_consistent_path.isChecked()
         for w in (self.copy_edit, self.paste_edit, self.copy_btn, self.paste_btn,
-                  self.spin_threads,
-                  self.chk_dailies, self.chk_kitsu_publish, self.chk_skip, self.chk_overwrite, self.chk_skip_sys,
-                  *self.local_checks.values(), *self.publish_checks.values()):
+                  self.spin_threads, self.chk_consistent_path,
+                  self.chk_skip, self.chk_overwrite, self.chk_skip_sys, self.chk_sound,
+                  *self.scan_checks.values()):
             w.setEnabled(not self._running)
+        self.chk_dailies.setEnabled(not self._running and not consistent)
+        self.chk_kitsu_publish.setEnabled(not self._running and not consistent)
 
     # ---------- CSV / Excel / Image and shot list ----------
     def browse_csv(self):
@@ -2953,6 +2998,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(self, APP_NAME, question)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._sfx.play("clear")
         self.log_view.clear()
         if self.shots:
             self.shots = []
@@ -3150,6 +3196,7 @@ class MainWindow(QMainWindow):
         self.current_mode = mode
         self._scanning = True
         self._update_controls()
+        self._sfx.play("scan")
         self.log(f"{mode}: scanning {len(self.shots)} shot(s) under {copy_from} ...")
         paste_to = self._paste_to()
         dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
@@ -3288,6 +3335,7 @@ class MainWindow(QMainWindow):
         self._progress_block = None
         self.btn_pause.setText("PAUSE")
         self._update_controls()
+        self._sfx.play("start")
         self.log(f"Start {mode}: {len(plans)} shot(s), {total} file(s)")
         self.worker.start()
 
@@ -3306,6 +3354,7 @@ class MainWindow(QMainWindow):
     def on_stop(self):
         if not self._running or self.worker is None:
             return
+        self._sfx.play("stop")
         self.worker.stop_event.set()
         self.worker.pause_event.clear()
         self.btn_pause.setText("PAUSE")
@@ -3403,12 +3452,15 @@ class MainWindow(QMainWindow):
         stopped = self.worker.stop_event.is_set() if self.worker else False
         self._finish_recording("stopped" if stopped else "finished")
         self._running = False
+        if not stopped:
+            self._sfx.play("done")
         self.log("Stopped by user." if stopped else "All shots finished.")
         self.refresh_tree()
         self._update_controls()
 
     # ---------- session save / restore ----------
     def _collect_session(self) -> dict:
+        selected_types = [k for k, cb in self.scan_checks.items() if cb.isChecked()]
         return {
             "format": 1,
             "app_version": APP_VERSION,
@@ -3416,10 +3468,13 @@ class MainWindow(QMainWindow):
             "path_history": self.path_history,
             "paste_to": self.paste_edit.text(),
             "current_mode": self.current_mode,
-            "local_types": [k for k, cb in self.local_checks.items() if cb.isChecked()],
-            "publish_types": [k for k, cb in self.publish_checks.items() if cb.isChecked()],
+            "consistent_path": self.chk_consistent_path.isChecked(),
+            "scan_types": selected_types,
+            "local_types": selected_types,
+            "publish_types": selected_types,
             "dailies": self.chk_dailies.isChecked(),
             "kitsu_publish": self.chk_kitsu_publish.isChecked(),
+            "sound": self.chk_sound.isChecked(),
             "overwrite": self.chk_overwrite.isChecked(),
             "skip_system": self.chk_skip_sys.isChecked(),
             "threads": self.spin_threads.value(),
@@ -3459,12 +3514,19 @@ class MainWindow(QMainWindow):
         self.path_history = [str(p) for p in data.get("path_history", []) if p][:PATH_HISTORY_MAX]
         self.copy_edit.setText(data.get("copy_from", ""))
         self.paste_edit.setText(data.get("paste_to", ""))
-        for key, cb in self.local_checks.items():
-            cb.setChecked(key in data.get("local_types", []))
-        for key, cb in self.publish_checks.items():
-            cb.setChecked(key in data.get("publish_types", []))
+        saved_types = data.get("scan_types")
+        if saved_types is None:
+            saved_types = data.get("local_types") or data.get("publish_types") or ["EXR"]
+        for key, cb in self.scan_checks.items():
+            cb.setChecked(key in saved_types)
         self.chk_dailies.setChecked(bool(data.get("dailies", False)))
         self.chk_kitsu_publish.setChecked(bool(data.get("kitsu_publish", True)))
+        consistent = data.get("consistent_path")
+        if consistent is None:
+            consistent = (data.get("current_mode", MODE_LOCAL) == MODE_LOCAL)
+        self.chk_consistent_path.setChecked(bool(consistent))
+        self.chk_sound.setChecked(bool(data.get("sound", True)))
+        self._sfx.enabled = self.chk_sound.isChecked()
         self.chk_skip_sys.setChecked(bool(data.get("skip_system", True)))
         self.spin_threads.setValue(int(data.get("threads", MAX_WORKERS)))
         if data.get("overwrite"):
