@@ -15,6 +15,7 @@ Requires Python 3.9+ and PySide6. Runs on Windows, macOS and Linux.
 from __future__ import annotations
 
 import csv
+import difflib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -139,6 +140,7 @@ class ScanResult:
     copied: bool = False            # every file already exists at the destination
     dest: str = ""                  # destination folder that holds the copy
     source: str = ""                # COPY FROM folder that was searched
+    hint: str = ""                  # near-miss or parent-folder suggestion when not found
 
 
 @dataclass
@@ -281,17 +283,73 @@ def folder_matches(folder_name: str, shot_name: str) -> bool:
     return bool(ShotIndex([shot_name]).match_folder(folder_name))
 
 
-def scan_source(copy_from: Path, names) -> dict:
-    """Walk the source tree once and return {shot name: [matching folders]}."""
+def _scan_source_with_dirs(copy_from: Path, names) -> tuple[dict, list[Path]]:
+    """Walk the source tree once and return ({shot name: [matching folders]}, all_dirs)."""
     names = list(dict.fromkeys(names))
     index = ShotIndex(names)
     matches = {n: [] for n in names}
+    all_dirs: list[Path] = []
     for dirpath, dirnames, _ in os.walk(copy_from):
         dirnames[:] = [d for d in dirnames if not is_system_name(d)]
         for d in dirnames:
+            full = Path(dirpath) / d
+            all_dirs.append(full)
             for shot in index.match_folder(d):
-                matches[shot].append(Path(dirpath) / d)
+                matches[shot].append(full)
+    return matches, all_dirs
+
+
+def scan_source(copy_from: Path, names) -> dict:
+    """Walk the source tree once and return {shot name: [matching folders]}."""
+    matches, _ = _scan_source_with_dirs(copy_from, names)
     return matches
+
+
+def find_shot_hints(missing_names: list[str], copy_from: Path, all_dirs: list[Path]) -> dict[str, str]:
+    """Suggest near-miss folder names in COPY FROM or matches in the parent folder."""
+    if not missing_names:
+        return {}
+    hints: dict[str, str] = {}
+
+    # 1. Near-miss folder names inside COPY FROM (handles typos like TLR vs TRL)
+    by_lower: dict[str, Path] = {}
+    for p in all_dirs:
+        low = p.name.casefold()
+        if low not in by_lower:
+            by_lower[low] = p
+    dir_keys = list(by_lower.keys())
+
+    still_missing: list[str] = []
+    for name in missing_names:
+        close = difflib.get_close_matches(name.casefold(), dir_keys, n=2, cutoff=0.72)
+        if close:
+            suggestions = ", ".join(f"{by_lower[k].name} ({by_lower[k]})" for k in close)
+            hints[name] = f"Did you mean: {suggestions}?"
+        else:
+            still_missing.append(name)
+
+    # 2. Check parent folder (shallow 2-level walk, skipping copy_from itself)
+    parent = copy_from.parent
+    if still_missing and parent != copy_from and parent.is_dir():
+        idx = ShotIndex(still_missing)
+        base_depth = len(parent.parts)
+        for dirpath, dirnames, _ in os.walk(parent):
+            cur = Path(dirpath)
+            if cur == copy_from or copy_from in cur.parents:
+                dirnames[:] = []
+                continue
+            if len(cur.parts) - base_depth >= 2:
+                dirnames[:] = []
+            else:
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not is_system_name(d) and (cur / d) != copy_from
+                ]
+            for d in dirnames:
+                for shot in idx.match_folder(d):
+                    if shot not in hints:
+                        hints[shot] = f"Found in parent folder: {cur / d} (try COPY FROM = {parent})"
+    return hints
 
 
 def find_first_folder(root: Path, name: str, names=None):
@@ -711,7 +769,10 @@ def shot_problem(shot: Shot):
     if scan.copied:
         return (C_YELLOW, f"Already on the destination ({scan.version_text}), shot skipped", scan.dest)
     if scan.found == 0:
-        return (C_YELLOW, "No files found for this shot in COPY FROM", scan.source)
+        reason = "No files found for this shot in COPY FROM"
+        if scan.hint:
+            reason += f" — {scan.hint}"
+        return (C_YELLOW, reason, scan.source)
     if not frames_match(scan.found, shot.frames):
         reason = f"Frame count mismatch: found {scan.found} file(s), CSV Frames = {shot.frames}"
         if scan.missing:
@@ -775,11 +836,15 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
-            matched = scan_source(self.copy_from, self.names)
+            matched, all_dirs = _scan_source_with_dirs(self.copy_from, self.names)
             results = [analyze_shot(n, matched[n], self.mode, self.exts, self.skip_system)
                        for n in self.names]
+            missing_names = [n for n, r in zip(self.names, results) if r.found == 0]
+            hints = find_shot_hints(missing_names, self.copy_from, all_dirs)
             for name, result in zip(self.names, results):
                 result.source = str(self.copy_from)
+                if result.found == 0:
+                    result.hint = hints.get(name, "")
                 if self.paste_to is not None:
                     mark_destination(result, name, self.mode, self.copy_from,
                                      self.paste_to, self.dailies)
