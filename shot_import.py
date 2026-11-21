@@ -113,6 +113,83 @@ def capture_first_frame_jpg(files: list[Path], out_path: Path) -> Path | None:
     return None
 
 
+def render_preview_mp4(files: list[Path], out_path: Path, fps: float = 24.0) -> Path | None:
+    """Encode an image sequence or movie into a lightweight H.264 MP4 preview for Kitsu."""
+    if not files:
+        return None
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return None
+
+    candidates = sorted((Path(f) for f in files if Path(f).is_file()), key=lambda p: p.name.lower())
+    if not candidates:
+        return None
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    first_ext = candidates[0].suffix.lower()
+
+    if first_ext in (".mov", ".mp4", ".m4v", ".avi", ".mkv"):
+        cmd = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-i", str(candidates[0]),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-vf", "scale='min(1280,iw)':-2",
+            "-preset", "fast", "-crf", "23", "-an",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=90, check=False)
+            if res.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+                return out_path
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return None
+
+    img_exts = {".exr", ".dpx", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+    seq_files = [p for p in candidates if p.suffix.lower() in img_exts]
+    if not seq_files:
+        return None
+
+    dur = 1.0 / max(1.0, float(fps))
+    concat_file = out_path.with_suffix(".concat.txt")
+    try:
+        lines = []
+        for p in seq_files:
+            escaped = str(p.resolve()).replace("'", "'\\''")
+            lines.append(f"file '{escaped}'")
+            lines.append(f"duration {dur:.6f}")
+        # Repeat last frame per ffmpeg concat demuxer spec
+        escaped_last = str(seq_files[-1].resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped_last}'")
+        concat_file.write_text("\n".join(lines), encoding="utf-8")
+
+        cmd = [ffmpeg, "-y", "-loglevel", "error"]
+        if first_ext == ".exr":
+            cmd += ["-apply_trc", "iec61966_2_1"]
+        cmd += [
+            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-vsync", "vfr",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-vf", "scale='min(1280,iw)':-2",
+            "-preset", "fast", "-crf", "23", "-an",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
+        if res.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+            return out_path
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
+        try:
+            if concat_file.exists():
+                concat_file.unlink()
+        except OSError:
+            pass
+    return None
+
+
 def parse_frame_value(raw: str) -> int | None:
     """Parse an integer frame count or a ``start-end`` range like ``1-286``."""
     text = str(raw or "").strip()

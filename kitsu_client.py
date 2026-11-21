@@ -552,14 +552,41 @@ class KitsuClient:
             raise KitsuAuthError(msg or f"Authentication failed (HTTP {status}).")
         raise KitsuError(msg or f"Attachment upload failed (HTTP {status}).")
 
+    def add_preview(
+        self,
+        task_id: str,
+        comment_id: str,
+        preview_path: str | Path,
+        set_main: bool = True,
+    ) -> dict[str, Any]:
+        """Create and upload an MP4/image preview onto a Kitsu task comment."""
+        tid = urllib.parse.quote(str(task_id), safe="")
+        cid = urllib.parse.quote(str(comment_id), safe="")
+        preview_obj = self._request(
+            "POST",
+            f"actions/tasks/{tid}/comments/{cid}/add-preview",
+            payload={},
+        )
+        if not isinstance(preview_obj, dict) or not preview_obj.get("id"):
+            return {}
+        pid = urllib.parse.quote(str(preview_obj["id"]), safe="")
+        uploaded = self._upload_multipart(f"pictures/preview-files/{pid}", Path(preview_path))
+        if set_main:
+            try:
+                self._request("PUT", f"actions/preview-files/{pid}/set-main-preview", payload={})
+            except KitsuError:
+                pass
+        return uploaded if isinstance(uploaded, dict) else preview_obj
+
     def add_comment(
         self,
         task_id: str,
         task_status_id: str,
         comment: str = "",
         attachment_path: str | Path | None = None,
+        preview_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        """Post a comment (and status update) on a Kitsu task, optionally with an attachment."""
+        """Post a comment (and status update) on a Kitsu task, with optional attachment/preview."""
         tid = urllib.parse.quote(str(task_id), safe="")
         payload = {
             "task_status_id": task_status_id,
@@ -568,14 +595,16 @@ class KitsuClient:
             "links": [],
         }
         created = self._request("POST", f"actions/tasks/{tid}/comment", payload=payload)
-        if attachment_path and Path(attachment_path).is_file() and isinstance(created, dict):
-            cid = created.get("id")
-            if cid:
-                cid_q = urllib.parse.quote(str(cid), safe="")
+        if isinstance(created, dict) and created.get("id"):
+            cid = str(created["id"])
+            if attachment_path and Path(attachment_path).is_file():
+                cid_q = urllib.parse.quote(cid, safe="")
                 self._upload_multipart(
                     f"actions/tasks/{tid}/comments/{cid_q}/add-attachment",
                     Path(attachment_path),
                 )
+            if preview_path and Path(preview_path).is_file():
+                self.add_preview(str(task_id), cid, Path(preview_path), set_main=True)
         return created if isinstance(created, dict) else {}
 
     def update_shot_task_on_publish(
@@ -586,8 +615,9 @@ class KitsuClient:
         task_type_name: str = "Compositing",
         status_name: str = "ĐợiCheck",
         attachment_path: str | Path | None = None,
+        preview_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        """Change a shot's Compositing task status and post destination path + optional JPG."""
+        """Change a shot's task status and post destination path + optional JPG/MP4 preview."""
         if not shot_id:
             raise KitsuError("Shot has no Kitsu ID.")
         task_types = self.get_task_types(project_id)
@@ -614,4 +644,5 @@ class KitsuClient:
             task_status_id=str(status_obj["id"]),
             comment=str(dest_path),
             attachment_path=attachment_path,
+            preview_path=preview_path,
         )

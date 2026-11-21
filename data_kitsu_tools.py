@@ -1529,9 +1529,23 @@ class KitsuWorker(QThread):
                 project_id = self.params["project_id"]
                 episodes = self.client.get_episodes(project_id)
                 sequences = self.client.get_sequences(project_id)
+                try:
+                    task_types = [str(t.get("name") or "") for t in self.client.get_task_types(project_id) if t.get("name")]
+                except Exception:
+                    task_types = []
+                try:
+                    task_statuses = [str(s.get("name") or "") for s in self.client.get_task_statuses(project_id) if s.get("name")]
+                except Exception:
+                    task_statuses = []
                 self.finished_ok.emit(
                     self.action,
-                    {"project_id": project_id, "episodes": episodes, "sequences": sequences},
+                    {
+                        "project_id": project_id,
+                        "episodes": episodes,
+                        "sequences": sequences,
+                        "task_types": task_types,
+                        "task_statuses": task_statuses,
+                    },
                 )
 
             elif self.action == "shots":
@@ -1562,6 +1576,8 @@ class KitsuDialog(QDialog):
         self._episodes: list[dict] = []
         self._sequences: list[dict] = []
         self._records: list[dict] = []
+        self.project_task_types: list[str] = list(self.config.get("task_types") or [])
+        self.project_task_statuses: list[str] = list(self.config.get("task_statuses") or [])
         self._build_ui()
         self._load_config()
         if self.client.user and self.client.access_token:
@@ -1933,6 +1949,10 @@ class KitsuDialog(QDialog):
             self._set_connected_state(self.client.user)
             self._episodes = payload.get("episodes", [])
             self._sequences = payload.get("sequences", [])
+            if payload.get("task_types"):
+                self.project_task_types = payload["task_types"]
+            if payload.get("task_statuses"):
+                self.project_task_statuses = payload["task_statuses"]
             self.cmb_episode.blockSignals(True)
             self.cmb_episode.clear()
             self.cmb_episode.addItem("All Episodes", "")
@@ -2195,7 +2215,7 @@ class KitsuDialog(QDialog):
 
 
 class KitsuPublishWorker(QThread):
-    """Update a shot's Compositing status to ĐợiCheck + post path & frame-1 JPG."""
+    """Update a shot's Kitsu task status + post path, frame-1 JPG & optional MP4 preview."""
 
     done = Signal(str, str)     # shot_name, log_message
     failed = Signal(str, str)   # shot_name, error_message
@@ -2207,6 +2227,9 @@ class KitsuPublishWorker(QThread):
         shot: Shot,
         dest_path: str,
         source_files: list[Path],
+        task_type_name: str = "Compositing",
+        status_name: str = "ĐợiCheck",
+        upload_mp4: bool = True,
     ):
         super().__init__()
         self.client = client
@@ -2214,9 +2237,13 @@ class KitsuPublishWorker(QThread):
         self.shot = shot
         self.dest_path = dest_path
         self.source_files = source_files
+        self.task_type_name = task_type_name or "Compositing"
+        self.status_name = status_name or "ĐợiCheck"
+        self.upload_mp4 = upload_mp4
 
     def run(self):
         tmp_jpg: Path | None = None
+        tmp_mp4: Path | None = None
         try:
             shot_id = self.shot.kitsu_id
             if not shot_id:
@@ -2229,20 +2256,32 @@ class KitsuPublishWorker(QThread):
                 raise kitsu_client.KitsuError("Shot not found in Kitsu project.")
 
             with tempfile.TemporaryDirectory(prefix="dkt_thumb_") as td:
-                candidate = Path(td) / f"{self.shot.name}_frame1.jpg"
-                tmp_jpg = shot_import.capture_first_frame_jpg(self.source_files, candidate)
+                td_path = Path(td)
+                tmp_jpg = shot_import.capture_first_frame_jpg(
+                    self.source_files, td_path / f"{self.shot.name}_frame1.jpg"
+                )
+                if self.upload_mp4:
+                    tmp_mp4 = shot_import.render_preview_mp4(
+                        self.source_files, td_path / f"{self.shot.name}_preview.mp4"
+                    )
                 self.client.update_shot_task_on_publish(
                     project_id=self.project_id,
                     shot_id=shot_id,
                     dest_path=self.dest_path,
-                    task_type_name="Compositing",
-                    status_name="ĐợiCheck",
+                    task_type_name=self.task_type_name,
+                    status_name=self.status_name,
                     attachment_path=tmp_jpg,
+                    preview_path=tmp_mp4,
                 )
-            attach_note = " + frame 1 JPG" if tmp_jpg else ""
+            extras = []
+            if tmp_jpg:
+                extras.append("frame 1 JPG")
+            if tmp_mp4:
+                extras.append("MP4 preview")
+            extra_str = (" + " + " & ".join(extras)) if extras else ""
             self.done.emit(
                 self.shot.name,
-                f"Kitsu updated: {self.shot.name} Compositing -> ĐợiCheck (comment path{attach_note})",
+                f"Kitsu updated: {self.shot.name} {self.task_type_name} -> {self.status_name} (path{extra_str})",
             )
         except Exception as exc:
             self.failed.emit(self.shot.name, f"Kitsu update failed for {self.shot.name}: {exc}")
@@ -2419,6 +2458,7 @@ class MainWindow(QMainWindow):
         self._kitsu_config: dict = {}
         self._kitsu_project_id: str = ""
         self._kitsu_pub_workers: list = []
+        self._project_presets: dict[str, dict] = {}
         self._sfx = retro_sfx.RetroSfx(self)
         self._build_ui()
         self._update_previews()
@@ -2518,12 +2558,35 @@ class MainWindow(QMainWindow):
         self.chk_consistent_path.toggled.connect(self._on_consistent_toggled)
         sv.addWidget(self.chk_consistent_path)
 
-        self.chk_kitsu_publish = QCheckBox("UPDATE KITSU (ĐợiCheck)")
+        self.chk_kitsu_publish = QCheckBox("UPDATE KITSU ON PUBLISH")
         self.chk_kitsu_publish.setChecked(True)
         self.chk_kitsu_publish.setToolTip(
-            "After PUBLISH, set Kitsu Compositing to ĐợiCheck, post destination path, and attach frame 1 JPG."
+            "After PUBLISH, update the selected Kitsu column & status, post destination path, and attach preview."
         )
+        self.chk_kitsu_publish.toggled.connect(self._update_kitsu_publish_controls)
         sv.addWidget(self.chk_kitsu_publish)
+
+        self.chk_kitsu_mp4 = QCheckBox("UPLOAD MP4 PREVIEW")
+        self.chk_kitsu_mp4.setChecked(True)
+        self.chk_kitsu_mp4.setToolTip(
+            "Encode published frames/movie to a lightweight MP4 via ffmpeg and upload as official Kitsu preview."
+        )
+        sv.addWidget(self.chk_kitsu_mp4)
+
+        kitsu_target_row = QHBoxLayout()
+        kitsu_target_row.setSpacing(4)
+        self.cmb_kitsu_task = QComboBox()
+        self.cmb_kitsu_task.setEditable(True)
+        self.cmb_kitsu_task.addItem("Compositing")
+        self.cmb_kitsu_task.setToolTip("Target Kitsu task/department column")
+        self.cmb_kitsu_status = QComboBox()
+        self.cmb_kitsu_status.setEditable(True)
+        self.cmb_kitsu_status.addItem("ĐợiCheck")
+        self.cmb_kitsu_status.setToolTip("Target Kitsu status after PUBLISH")
+        kitsu_target_row.addWidget(self.cmb_kitsu_task, 1)
+        kitsu_target_row.addWidget(QLabel("→"))
+        kitsu_target_row.addWidget(self.cmb_kitsu_status, 1)
+        sv.addLayout(kitsu_target_row)
 
         types_grid = QGridLayout()
         types_grid.setSpacing(6)
@@ -2753,10 +2816,17 @@ class MainWindow(QMainWindow):
     def _effective_mode(self) -> str:
         return MODE_LOCAL if self.chk_consistent_path.isChecked() else MODE_PUBLISH
 
+    def _update_kitsu_publish_controls(self, *_):
+        active = (not self._running) and (not self.chk_consistent_path.isChecked())
+        self.chk_kitsu_publish.setEnabled(active)
+        sub = active and self.chk_kitsu_publish.isChecked()
+        for w in (self.chk_kitsu_mp4, self.cmb_kitsu_task, self.cmb_kitsu_status):
+            w.setEnabled(sub)
+
     def _on_consistent_toggled(self, checked: bool):
         self.current_mode = MODE_LOCAL if checked else MODE_PUBLISH
         self.chk_dailies.setEnabled(not checked and not self._running)
-        self.chk_kitsu_publish.setEnabled(not checked and not self._running)
+        self._update_kitsu_publish_controls()
         self._update_previews()
 
     def _sync_sound_mode(self):
@@ -2836,7 +2906,7 @@ class MainWindow(QMainWindow):
                   *self.scan_checks.values()):
             w.setEnabled(not self._running)
         self.chk_dailies.setEnabled(not self._running and not consistent)
-        self.chk_kitsu_publish.setEnabled(not self._running and not consistent)
+        self._update_kitsu_publish_controls()
 
     # ---------- CSV / Excel / Image and shot list ----------
     def browse_csv(self):
@@ -3027,20 +3097,96 @@ class MainWindow(QMainWindow):
             self.kitsu_status_lbl.setText("Kitsu: not connected")
             self.kitsu_status_lbl.setStyleSheet("color: #8a8f98; font-size: 11px;")
 
+    def _populate_kitsu_publish_targets(self, task_types: list[str], task_statuses: list[str]):
+        if task_types:
+            cur_task = self.cmb_kitsu_task.currentText().strip() or "Compositing"
+            self.cmb_kitsu_task.blockSignals(True)
+            self.cmb_kitsu_task.clear()
+            for tt in task_types:
+                self.cmb_kitsu_task.addItem(tt)
+            idx = self.cmb_kitsu_task.findText(cur_task, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.cmb_kitsu_task.setCurrentIndex(idx)
+            else:
+                self.cmb_kitsu_task.setEditText(cur_task)
+            self.cmb_kitsu_task.blockSignals(False)
+
+        if task_statuses:
+            cur_status = self.cmb_kitsu_status.currentText().strip() or "ĐợiCheck"
+            self.cmb_kitsu_status.blockSignals(True)
+            self.cmb_kitsu_status.clear()
+            for st in task_statuses:
+                self.cmb_kitsu_status.addItem(st)
+            idx = self.cmb_kitsu_status.findText(cur_status, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                self.cmb_kitsu_status.setCurrentIndex(idx)
+            else:
+                self.cmb_kitsu_status.setEditText(cur_status)
+            self.cmb_kitsu_status.blockSignals(False)
+
+    def _save_current_project_preset(self):
+        pid = self._kitsu_project_id
+        if not pid:
+            return
+        self._project_presets[pid] = {
+            "copy_from": self.copy_edit.text(),
+            "paste_to": self.paste_edit.text(),
+            "scan_types": [k for k, cb in self.scan_checks.items() if cb.isChecked()],
+            "consistent_path": self.chk_consistent_path.isChecked(),
+            "dailies": self.chk_dailies.isChecked(),
+            "kitsu_publish": self.chk_kitsu_publish.isChecked(),
+            "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
+            "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
+            "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
+        }
+
+    def _apply_project_preset(self, project_id: str, project_name: str = ""):
+        preset = self._project_presets.get(project_id)
+        if not isinstance(preset, dict):
+            return
+        if preset.get("copy_from"):
+            self.copy_edit.setText(preset["copy_from"])
+        if preset.get("paste_to"):
+            self.paste_edit.setText(preset["paste_to"])
+        if isinstance(preset.get("scan_types"), list):
+            for key, cb in self.scan_checks.items():
+                cb.setChecked(key in preset["scan_types"])
+        if "consistent_path" in preset:
+            self.chk_consistent_path.setChecked(bool(preset["consistent_path"]))
+        if "dailies" in preset:
+            self.chk_dailies.setChecked(bool(preset["dailies"]))
+        if "kitsu_publish" in preset:
+            self.chk_kitsu_publish.setChecked(bool(preset["kitsu_publish"]))
+        if "kitsu_upload_mp4" in preset:
+            self.chk_kitsu_mp4.setChecked(bool(preset["kitsu_upload_mp4"]))
+        if preset.get("kitsu_task_type"):
+            self.cmb_kitsu_task.setEditText(preset["kitsu_task_type"])
+        if preset.get("kitsu_status"):
+            self.cmb_kitsu_status.setEditText(preset["kitsu_status"])
+        self._update_kitsu_publish_controls()
+        self._update_previews()
+        if project_name:
+            self.log(f"Applied saved preset for Kitsu project: {project_name}")
+
     def open_kitsu_dialog(self):
         if self._busy():
             self.log("Wait for the current scan or copy to finish before fetching from Kitsu.")
             return
+        self._save_current_project_preset()
         dlg = KitsuDialog(self._kitsu_client, self._kitsu_config, parent=self)
         dlg.import_requested.connect(self._on_kitsu_import)
         dlg.exec()
         self._kitsu_config = dlg.export_config()
+        if dlg.project_task_types or dlg.project_task_statuses:
+            self._populate_kitsu_publish_targets(dlg.project_task_types, dlg.project_task_statuses)
         self._update_kitsu_badge()
         self.save_session()
 
     def _on_kitsu_import(self, records: list, replace: bool, project_name: str, project_id: str = ""):
+        self._save_current_project_preset()
         if project_id:
             self._kitsu_project_id = project_id
+            self._apply_project_preset(project_id, project_name)
         new_shots = shots_from_kitsu(records)
         self._apply_loaded_shots(new_shots, replace=replace, source_desc=f"Kitsu ({project_name})")
 
@@ -3635,6 +3781,9 @@ class MainWindow(QMainWindow):
             shot=shot,
             dest_path=dest_path,
             source_files=list(unit.copy_files),
+            task_type_name=self.cmb_kitsu_task.currentText().strip() or "Compositing",
+            status_name=self.cmb_kitsu_status.currentText().strip() or "ĐợiCheck",
+            upload_mp4=self.chk_kitsu_mp4.isChecked(),
         )
         worker.done.connect(lambda _name, msg: self.log(msg))
         worker.failed.connect(lambda _name, msg: self.log(msg, C_ORANGE))
@@ -3657,6 +3806,7 @@ class MainWindow(QMainWindow):
 
     # ---------- session save / restore ----------
     def _collect_session(self) -> dict:
+        self._save_current_project_preset()
         selected_types = [k for k, cb in self.scan_checks.items() if cb.isChecked()]
         return {
             "format": 1,
@@ -3671,6 +3821,9 @@ class MainWindow(QMainWindow):
             "publish_types": selected_types,
             "dailies": self.chk_dailies.isChecked(),
             "kitsu_publish": self.chk_kitsu_publish.isChecked(),
+            "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
+            "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
+            "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
             "sound_mode": self._sfx.mode,
             "sound_volume": self.slider_vol.value(),
             "h_splitter": self.h_splitter.sizes(),
@@ -3681,6 +3834,7 @@ class MainWindow(QMainWindow):
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
             "kitsu": self._kitsu_config,
             "kitsu_project_id": self._kitsu_project_id,
+            "project_presets": self._project_presets,
             "shots": [
                 {"name": s.name, "frames": s.frames, "seq": s.seq, "state": s.state,
                  "done": s.done, "force_overwrite": s.force_overwrite,
@@ -3721,6 +3875,14 @@ class MainWindow(QMainWindow):
             cb.setChecked(key in saved_types)
         self.chk_dailies.setChecked(bool(data.get("dailies", False)))
         self.chk_kitsu_publish.setChecked(bool(data.get("kitsu_publish", True)))
+        self.chk_kitsu_mp4.setChecked(bool(data.get("kitsu_upload_mp4", True)))
+        if data.get("kitsu_task_type"):
+            self.cmb_kitsu_task.setEditText(str(data["kitsu_task_type"]))
+        if data.get("kitsu_status"):
+            self.cmb_kitsu_status.setEditText(str(data["kitsu_status"]))
+        presets = data.get("project_presets")
+        if isinstance(presets, dict):
+            self._project_presets = presets
         consistent = data.get("consistent_path")
         if consistent is None:
             consistent = (data.get("current_mode", MODE_LOCAL) == MODE_LOCAL)
