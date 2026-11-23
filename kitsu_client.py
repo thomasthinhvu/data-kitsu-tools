@@ -9,10 +9,12 @@ and self-signed SSL fallback).
 """
 from __future__ import annotations
 
+import http.client
 import json
 import mimetypes
 import os
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -96,11 +98,25 @@ class KitsuClient:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.user: dict[str, Any] | None = None
+        self._conn_lock = threading.Lock()
+        self._conn: http.client.HTTPConnection | None = None
+        self._conn_key: tuple[str, int, str, bool] | None = None
+
+    def _close_conn(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+            self._conn_key = None
 
     def set_host(self, host: str, verify_ssl: bool | None = None) -> str:
         self.api_url = normalize_api_url(host)
         if verify_ssl is not None:
             self.verify_ssl = verify_ssl
+        with self._conn_lock:
+            self._close_conn()
         return self.api_url
 
     def set_token(self, token: str | dict[str, Any] | None) -> None:
@@ -131,6 +147,51 @@ class KitsuClient:
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
+    def _http_call(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: dict[str, str],
+    ) -> tuple[int, bytes]:
+        """Execute an HTTP request reusing a thread-safe Keep-Alive connection."""
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if scheme == "https" else 80)
+        req_path = parsed.path or "/"
+        if parsed.query:
+            req_path += "?" + parsed.query
+        key = (scheme, port, host, self.verify_ssl)
+        req_headers = dict(headers)
+        req_headers.setdefault("Connection", "keep-alive")
+
+        with self._conn_lock:
+            for attempt in range(2):
+                if self._conn is None or self._conn_key != key:
+                    self._close_conn()
+                    if scheme == "https":
+                        self._conn = http.client.HTTPSConnection(
+                            host, port, timeout=self.timeout, context=self._ssl_context()
+                        )
+                    else:
+                        self._conn = http.client.HTTPConnection(
+                            host, port, timeout=self.timeout
+                        )
+                    self._conn_key = key
+                try:
+                    self._conn.request(method, req_path, body=body, headers=req_headers)
+                    resp = self._conn.getresponse()
+                    raw = resp.read()
+                    return resp.status, raw
+                except (http.client.HTTPException, OSError) as exc:
+                    self._close_conn()
+                    if attempt == 1:
+                        raise KitsuConnectionError(
+                            f"Could not connect to Kitsu ({url}): {exc}"
+                        ) from exc
+        raise KitsuConnectionError(f"Could not connect to Kitsu ({url}).")
+
     def _raw_request(
         self,
         method: str,
@@ -158,26 +219,13 @@ class KitsuClient:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        ctx = self._ssl_context()
+        status, raw = self._http_call(method, url, body, headers)
+        text = raw.decode("utf-8", errors="replace") if raw else ""
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout, context=ctx) as resp:
-                raw = resp.read()
-                text = raw.decode("utf-8", errors="replace") if raw else ""
-                data = json.loads(text) if text.strip() else None
-                return resp.status, data
-        except urllib.error.HTTPError as exc:
-            raw = exc.read()
-            text = raw.decode("utf-8", errors="replace") if raw else ""
-            try:
-                data = json.loads(text) if text.strip() else {"message": exc.reason}
-            except ValueError:
-                data = {"message": text or str(exc.reason)}
-            return exc.code, data
-        except urllib.error.URLError as exc:
-            raise KitsuConnectionError(f"Could not connect to Kitsu ({url}): {exc.reason}") from exc
-        except OSError as exc:
-            raise KitsuConnectionError(f"Network error contacting Kitsu ({url}): {exc}") from exc
+            data = json.loads(text) if text.strip() else None
+        except ValueError:
+            data = {"message": text}
+        return status, data
 
     def _request(
         self,
@@ -374,6 +422,7 @@ class KitsuClient:
                     "frames": extract_shot_frames(kshot),
                     "fps": extra.get("fps"),
                     "resolution": extra.get("resolution") or "",
+                    "thumbnail_id": str(kshot.get("preview_file_id") or ""),
                     "tasks": tasks_by_shot.get(shot_id, {}),
                     "assignees": sorted(assignees_by_shot.get(shot_id, set())),
                     "assignee_ids": sorted(assignee_ids_by_shot.get(shot_id, set())),
@@ -382,6 +431,23 @@ class KitsuClient:
 
         results.sort(key=lambda r: (r["episode"].lower(), r["sequence"].lower(), r["name"].lower()))
         return results
+
+    def download_thumbnail(self, preview_file_id: str) -> bytes | None:
+        """Download a shot's thumbnail PNG bytes from Kitsu."""
+        if not preview_file_id or not self.api_url:
+            return None
+        pid = urllib.parse.quote(str(preview_file_id), safe="")
+        url = f"{self.api_url}/pictures/thumbnails/preview-files/{pid}.png"
+        headers = {"User-Agent": self.USER_AGENT}
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        try:
+            status, raw = self._http_call("GET", url, None, headers)
+            if 200 <= status < 300 and raw:
+                return raw
+        except KitsuError:
+            pass
+        return None
 
     def get_task_types(self, project_id: str | None = None) -> list[dict[str, Any]]:
         """Return task types (all or for a specific project)."""

@@ -6,14 +6,18 @@ Data Kitsu Tools 2.0.
 """
 from __future__ import annotations
 
+import base64
 import glob
 import json
+import mimetypes
 import os
 import re
 import shutil
 import statistics
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -555,8 +559,113 @@ def reconstruct_table_from_words(words: list[dict]) -> list[list[str]]:
     return table
 
 
-def extract_ocr_data_from_image(path: Path) -> tuple[str, list[list[str]]]:
-    """Extract both plain text and reconstructed 2D table from a PNG/JPG image."""
+def extract_table_with_gemini(path: Path, api_key: str) -> tuple[str, list[list[str]]]:
+    """Use Gemini Vision API (gemini-2.5-flash) to extract a clean shot table."""
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("Gemini API key is empty.")
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    prompt = (
+        "Extract the VFX/animation shot list from this image. "
+        "Return ONLY valid JSON: an array of objects with keys "
+        '"name" (string shot code/name), "seq" (string sequence/scene or ""), '
+        'and "frames" (integer frame count, computing end-start+1 if a range or start/end is shown, or null). '
+        "No markdown fences, no extra text."
+    )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.0},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini API error (HTTP {exc.code}): {err_body[:200]}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"Gemini connection error: {exc}") from exc
+
+    raw_text = ""
+    for cand in body.get("candidates") or []:
+        for part in (cand.get("content") or {}).get("parts") or []:
+            if part.get("text"):
+                raw_text += part["text"]
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+    items = json.loads(cleaned)
+    if not isinstance(items, list):
+        raise RuntimeError("Gemini did not return a JSON list.")
+    table = [["Shot Code", "Sequence", "Frames"]]
+    for it in items:
+        if not isinstance(it, dict) or not it.get("name"):
+            continue
+        f_val = it.get("frames")
+        table.append([
+            str(it.get("name") or "").strip(),
+            str(it.get("seq") or "").strip(),
+            "" if f_val is None else str(f_val),
+        ])
+    text = "\n".join(" ".join(c for c in r if c) for r in table[1:])
+    return text, table
+
+
+def extract_table_with_rapidocr(path: Path) -> tuple[str, list[list[str]]] | None:
+    """Use local RapidOCR (if installed) for high-accuracy offline table OCR."""
+    try:
+        from rapidocr_onnxruntime import RapidOCR  # type: ignore
+    except ImportError:
+        return None
+    engine = RapidOCR()
+    with tempfile.TemporaryDirectory(prefix="dkt_rocr_") as td:
+        norm_img = _prepare_ocr_image(path.resolve(), Path(td) / "ocr_input.png")
+        result, _ = engine(str(norm_img))
+    if not result:
+        return "", []
+    words = []
+    for box, txt, _score in result:
+        xs = [float(pt[0]) for pt in box]
+        ys = [float(pt[1]) for pt in box]
+        words.append({
+            "text": str(txt),
+            "x": min(xs),
+            "y": min(ys),
+            "w": max(xs) - min(xs),
+            "h": max(ys) - min(ys),
+        })
+    table = reconstruct_table_from_words(words)
+    text = "\n".join(" ".join(c for c in r if c) for r in table)
+    return text, table
+
+
+def extract_ocr_data_from_image(path: Path, gemini_api_key: str = "") -> tuple[str, list[list[str]]]:
+    """Extract plain text and reconstructed 2D table from a PNG/JPG image."""
+    key = (gemini_api_key or os.getenv("GEMINI_API_KEY") or "").strip()
+    if key:
+        try:
+            return extract_table_with_gemini(path, key)
+        except Exception:
+            pass
+
+    rapid = extract_table_with_rapidocr(path)
+    if rapid is not None:
+        return rapid
+
     last_err = ""
     if os.name == "nt":
         ps_script = (

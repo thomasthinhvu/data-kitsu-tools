@@ -141,6 +141,7 @@ class ScanResult:
     dest: str = ""                  # destination folder that holds the copy
     source: str = ""                # COPY FROM folder that was searched
     hint: str = ""                  # near-miss or parent-folder suggestion when not found
+    suggested_folders: list = field(default_factory=list)
 
 
 @dataclass
@@ -305,11 +306,14 @@ def scan_source(copy_from: Path, names) -> dict:
     return matches
 
 
-def find_shot_hints(missing_names: list[str], copy_from: Path, all_dirs: list[Path]) -> dict[str, str]:
+def find_shot_hints(
+    missing_names: list[str], copy_from: Path, all_dirs: list[Path]
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Suggest near-miss folder names in COPY FROM or matches in the parent folder."""
     if not missing_names:
-        return {}
+        return {}, {}
     hints: dict[str, str] = {}
+    suggested_paths: dict[str, list[str]] = {}
 
     # 1. Near-miss folder names inside COPY FROM (handles typos like TLR vs TRL)
     by_lower: dict[str, Path] = {}
@@ -325,6 +329,7 @@ def find_shot_hints(missing_names: list[str], copy_from: Path, all_dirs: list[Pa
         if close:
             suggestions = ", ".join(f"{by_lower[k].name} ({by_lower[k]})" for k in close)
             hints[name] = f"Did you mean: {suggestions}?"
+            suggested_paths[name] = [str(by_lower[k]) for k in close]
         else:
             still_missing.append(name)
 
@@ -349,7 +354,8 @@ def find_shot_hints(missing_names: list[str], copy_from: Path, all_dirs: list[Pa
                 for shot in idx.match_folder(d):
                     if shot not in hints:
                         hints[shot] = f"Found in parent folder: {cur / d} (try COPY FROM = {parent})"
-    return hints
+                        suggested_paths[shot] = [str(cur / d)]
+    return hints, suggested_paths
 
 
 def find_first_folder(root: Path, name: str, names=None):
@@ -840,11 +846,12 @@ class ScanWorker(QThread):
             results = [analyze_shot(n, matched[n], self.mode, self.exts, self.skip_system)
                        for n in self.names]
             missing_names = [n for n, r in zip(self.names, results) if r.found == 0]
-            hints = find_shot_hints(missing_names, self.copy_from, all_dirs)
+            hints, suggested_paths = find_shot_hints(missing_names, self.copy_from, all_dirs)
             for name, result in zip(self.names, results):
                 result.source = str(self.copy_from)
                 if result.found == 0:
                     result.hint = hints.get(name, "")
+                    result.suggested_folders = suggested_paths.get(name, [])
                 if self.paste_to is not None:
                     mark_destination(result, name, self.mode, self.copy_from,
                                      self.paste_to, self.dailies)
@@ -1560,6 +1567,25 @@ class KitsuWorker(QThread):
             self.failed.emit(self.action, str(exc))
 
 
+class KitsuThumbWorker(QThread):
+    """Download shot thumbnails from Kitsu in the background."""
+
+    thumb_ready = Signal(int, bytes)
+
+    def __init__(self, client: kitsu_client.KitsuClient, items: list[tuple[int, str]]):
+        super().__init__()
+        self.client = client
+        self.items = items
+
+    def run(self):
+        for idx, thumb_id in self.items:
+            if self.isInterruptionRequested():
+                return
+            data = self.client.download_thumbnail(thumb_id)
+            if data:
+                self.thumb_ready.emit(idx, data)
+
+
 class KitsuDialog(QDialog):
     """Connect to a Kitsu server, browse projects/episodes/sequences, and import shots."""
 
@@ -1572,6 +1598,8 @@ class KitsuDialog(QDialog):
         self.client = client
         self.config = dict(config)
         self._worker: KitsuWorker | None = None
+        self._thumb_worker: KitsuThumbWorker | None = None
+        self._thumb_cache: dict[str, QIcon] = {}
         self._projects: list[dict] = []
         self._episodes: list[dict] = []
         self._sequences: list[dict] = []
@@ -1733,12 +1761,18 @@ class KitsuDialog(QDialog):
         self.cmb_other_status = QComboBox()
         self.cmb_other_status.addItem("All", "")
         self.cmb_other_status.currentIndexChanged.connect(self._apply_filter)
-        fg.addWidget(self.cmb_other_status, 4, 3, 1, 2)
+        fg.addWidget(self.cmb_other_status, 4, 3)
+
+        self.chk_thumbs = QCheckBox("Thumbnails")
+        self.chk_thumbs.setToolTip("Load shot preview thumbnails from Kitsu")
+        self.chk_thumbs.toggled.connect(self._maybe_load_thumbnails)
+        fg.addWidget(self.chk_thumbs, 4, 4)
 
         layout.addWidget(filter_box)
 
         # 3. Shots Preview Tree
         self.shot_tree = QTreeWidget()
+        self.shot_tree.setIconSize(QSize(48, 27))
         self.shot_tree.setHeaderLabels([
             "SHOT", "EPISODE", "SEQUENCE", "FRAMES",
             "ASSIGNATIONS", "PREPARE", "COMPOSITING", "INFO",
@@ -2107,6 +2141,46 @@ class KitsuDialog(QDialog):
         self.shot_tree.blockSignals(False)
         self._apply_filter()
         self._update_selected_count()
+        self._maybe_load_thumbnails()
+
+    def _maybe_load_thumbnails(self):
+        if self._thumb_worker is not None and self._thumb_worker.isRunning():
+            self._thumb_worker.requestInterruption()
+            self._thumb_worker.wait(500)
+        if not self.chk_thumbs.isChecked() or not self._records:
+            return
+        pending: list[tuple[int, str]] = []
+        for i in range(self.shot_tree.topLevelItemCount()):
+            item = self.shot_tree.topLevelItem(i)
+            idx = item.data(0, ROLE_INDEX)
+            if not isinstance(idx, int) or idx >= len(self._records):
+                continue
+            tid = str(self._records[idx].get("thumbnail_id") or "")
+            if not tid:
+                continue
+            if tid in self._thumb_cache:
+                item.setIcon(0, self._thumb_cache[tid])
+            else:
+                pending.append((idx, tid))
+        if pending:
+            self._thumb_worker = KitsuThumbWorker(self.client, pending)
+            self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
+            self._thumb_worker.start()
+
+    def _on_thumb_ready(self, rec_idx: int, raw: bytes):
+        pm = QPixmap()
+        if not pm.loadFromData(raw):
+            return
+        icon = QIcon(pm.scaled(48, 27, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        if 0 <= rec_idx < len(self._records):
+            tid = str(self._records[rec_idx].get("thumbnail_id") or "")
+            if tid:
+                self._thumb_cache[tid] = icon
+        for i in range(self.shot_tree.topLevelItemCount()):
+            item = self.shot_tree.topLevelItem(i)
+            if item.data(0, ROLE_INDEX) == rec_idx:
+                item.setIcon(0, icon)
+                break
 
     def _apply_filter(self):
         needle = self.search_edit.text().strip().lower()
@@ -2478,6 +2552,8 @@ class MainWindow(QMainWindow):
         self._kitsu_project_id: str = ""
         self._kitsu_pub_workers: list = []
         self._project_presets: dict[str, dict] = {}
+        self._gemini_api_key: str = ""
+        self._tree_filter: str = "all"
         self._sfx = retro_sfx.RetroSfx(self)
         self._build_ui()
         self._update_previews()
@@ -2730,6 +2806,31 @@ class MainWindow(QMainWindow):
         title_row.addSpacing(8)
         title_row.addWidget(self.btn_kitsu)
         right.addLayout(title_row)
+
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(4)
+        self._tree_filter_btns: dict[str, QPushButton] = {}
+        for key, label in (
+            ("all", "All"),
+            ("ready", "Ready"),
+            ("mismatch", "Mismatch"),
+            ("missing", "Missing"),
+            ("done", "Done"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(key == "all")
+            btn.setMinimumHeight(24)
+            btn.clicked.connect(lambda _=False, k=key: self._set_tree_filter(k))
+            self._tree_filter_btns[key] = btn
+            filter_bar.addWidget(btn)
+        self.tree_search_edit = QLineEdit()
+        self.tree_search_edit.setPlaceholderText("Filter shots...")
+        self.tree_search_edit.setClearButtonEnabled(True)
+        self.tree_search_edit.textChanged.connect(self._apply_tree_filter)
+        filter_bar.addWidget(self.tree_search_edit, 1)
+        right.addLayout(filter_bar)
+
         self.tree = ShotTree()
         self.tree.setHeaderLabels(["NO", "SEQ", "NAME", "VERSION", "FRAMES", "STATUS"])
         self.tree.setRootIsDecorated(True)
@@ -2759,6 +2860,7 @@ class MainWindow(QMainWindow):
         add_menu.addAction("Fetch from Kitsu...", self.open_kitsu_dialog)
         add_menu.addAction("Import CSV / Excel / Image...", self.browse_csv)
         add_menu.addAction("Paste Screenshot (Ctrl+V)", self.paste_from_clipboard)
+        add_menu.addAction("OCR Settings (Gemini API)...", self.configure_ocr_settings)
         add_menu.addSeparator()
         add_menu.addAction("Add shot folder...", self.add_folder_shot)
         add_menu.addAction("Add shot by name...", self.add_named_shot)
@@ -3074,7 +3176,9 @@ class MainWindow(QMainWindow):
                 self._import_from_table_or_text(rows, "", replace=replace, source_desc=path.name)
                 return
             if ext in (".png", ".jpg", ".jpeg"):
-                text, rows = shot_import.extract_ocr_data_from_image(path)
+                text, rows = shot_import.extract_ocr_data_from_image(
+                    path, gemini_api_key=self._gemini_api_key
+                )
                 self._import_from_table_or_text(rows, text, replace=replace, source_desc=path.name)
                 return
             raise ValueError(f"Unsupported file type: {ext}")
@@ -3099,7 +3203,9 @@ class MainWindow(QMainWindow):
                 if not img.save(str(tmp_png), "PNG"):
                     return
                 try:
-                    text, rows = shot_import.extract_ocr_data_from_image(tmp_png)
+                    text, rows = shot_import.extract_ocr_data_from_image(
+                        tmp_png, gemini_api_key=self._gemini_api_key
+                    )
                     self._import_from_table_or_text(
                         rows, text, replace=False, source_desc="Clipboard Screenshot"
                     )
@@ -3385,6 +3491,62 @@ class MainWindow(QMainWindow):
             return None
         return self._shot_folder(index)
 
+    def configure_ocr_settings(self):
+        key, ok = QInputDialog.getText(
+            self,
+            "OCR Settings (Gemini Vision)",
+            "Optional Gemini API Key for high-accuracy table OCR\n"
+            "(leave blank to use RapidOCR / Windows OCR):",
+            QLineEdit.EchoMode.Password,
+            self._gemini_api_key,
+        )
+        if ok:
+            self._gemini_api_key = key.strip()
+            self.save_session()
+            state = "saved" if self._gemini_api_key else "cleared (using local OCR)"
+            self.log(f"OCR Gemini API key {state}.")
+
+    def _set_tree_filter(self, key: str):
+        self._tree_filter = key
+        for k, btn in self._tree_filter_btns.items():
+            btn.setChecked(k == key)
+        self._apply_tree_filter()
+
+    def _shot_matches_tree_filter(self, shot: Shot, needle: str) -> bool:
+        if needle:
+            hay = f"{shot.seq} {shot.name} {status_text(shot)}".lower()
+            if needle not in hay:
+                return False
+        flt = self._tree_filter
+        if flt == "all":
+            return True
+        if flt == "done":
+            return shot.state == "done"
+        if flt == "missing":
+            return shot.scan is not None and shot.scan.found == 0 and not shot.scan.copied
+        if flt == "mismatch":
+            return (
+                shot.scan is not None
+                and shot.scan.found > 0
+                and not shot.scan.copied
+                and not frames_match(shot.scan.found, shot.frames)
+            )
+        if flt == "ready":
+            return (
+                shot.state != "done"
+                and shot.scan is not None
+                and shot.scan.found > 0
+                and not shot.scan.copied
+                and (frames_match(shot.scan.found, shot.frames) or shot.force_copy)
+            )
+        return True
+
+    def _apply_tree_filter(self, *_):
+        needle = self.tree_search_edit.text().strip().lower()
+        for idx, item in self.items.items():
+            if idx < len(self.shots):
+                item.setHidden(not self._shot_matches_tree_filter(self.shots[idx], needle))
+
     def _shot_source_and_dest(self, shot: Shot, src_path: Path | None = None) -> tuple[Path | None, Path | None]:
         """Compute (source_path, destination_path) for a shot or variant."""
         if src_path is None:
@@ -3439,6 +3601,28 @@ class MainWindow(QMainWindow):
         act_copy = menu.addAction("Copy path")
         if item.parent() is None and index is not None and index < len(self.shots):
             shot = self.shots[index]
+            if shot.scan and shot.scan.suggested_folders:
+                for spath in shot.scan.suggested_folders:
+                    act_use = menu.addAction(f"Use suggested folder: {Path(spath).name}")
+                    act_use.setToolTip(spath)
+                    act_use.setEnabled(not self._busy())
+                    act_use.triggered.connect(
+                        lambda _=False, i=index, p=spath: self.use_suggested_folder(i, p)
+                    )
+            act_kitsu_now = menu.addAction("Update Kitsu Now")
+            can_kitsu = bool(
+                self._kitsu_client.access_token
+                and (self._kitsu_project_id or self._kitsu_config.get("project_id"))
+                and not self._busy()
+            )
+            act_kitsu_now.setEnabled(can_kitsu)
+            act_kitsu_now.setToolTip(
+                "Update Kitsu task status + comment path + preview without re-copying files"
+                if can_kitsu else "Connect to Kitsu and select a project first"
+            )
+            act_kitsu_now.triggered.connect(
+                lambda _=False, i=index: self.update_kitsu_now(i)
+            )
             act_force = menu.addAction("Force copy")
             act_force.setCheckable(True)
             act_force.setChecked(shot.force_copy)
@@ -3490,6 +3674,53 @@ class MainWindow(QMainWindow):
 
     def show_about(self):
         AboutDialog(self).exec()
+
+    def use_suggested_folder(self, index: int, folder_path: str):
+        if self._busy() or index >= len(self.shots):
+            return
+        shot = self.shots[index]
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            QMessageBox.warning(self, APP_NAME, f"Folder not found:\n{folder}")
+            return
+        mode = self._effective_mode()
+        exts = self._selected_exts(mode)
+        skip_sys = self.chk_skip_sys.isChecked()
+        matched = [folder] + [
+            Path(dp) / d
+            for dp, dns, _ in os.walk(folder)
+            for d in dns
+            if not is_system_name(d)
+        ]
+        res = analyze_shot(shot.name, matched, mode, exts, skip_sys)
+        copy_from = self._copy_from() or folder.parent
+        res.source = str(copy_from)
+        paste_to = self._paste_to()
+        if paste_to is not None:
+            dailies = self._dailies_name() if (mode == MODE_PUBLISH and self.chk_dailies.isChecked()) else ""
+            mark_destination(res, shot.name, mode, copy_from, paste_to, dailies)
+        shot.scan = res
+        if shot.state not in ("done", "partial"):
+            shot.state = "scanned"
+        self.refresh_tree()
+        self._update_previews()
+        self.log(f"Mapped {shot.name} -> {folder}")
+
+    def update_kitsu_now(self, index: int):
+        if index >= len(self.shots):
+            return
+        shot = self.shots[index]
+        if not shot.scan or not shot.scan.units:
+            folder = self._shot_folder(index)
+            if folder is None or not folder.is_dir():
+                QMessageBox.warning(self, APP_NAME, f"Source folder for {shot.name} was not found.")
+                return
+            mode = self._effective_mode()
+            exts = self._selected_exts(mode)
+            res = analyze_shot(shot.name, [folder], mode, exts, self.chk_skip_sys.isChecked())
+            res.source = str(self._copy_from() or folder.parent)
+            shot.scan = res
+        self._queue_kitsu_publish_update(shot)
 
     def set_force_copy(self, index: int, checked: bool):
         shot = self.shots[index]
@@ -3545,6 +3776,7 @@ class MainWindow(QMainWindow):
                     apply_style(child, {"color": C_YELLOW} if shot.scan.copied
                                 else unit_style(unit.found, shot.frames))
                 top.setExpanded(shot.name in self._expanded)
+        self._apply_tree_filter()
 
     def _fill_top(self, item: QTreeWidgetItem, index: int, shot: Shot):
         item.setText(COL_NO, str(index + 1))
@@ -3570,6 +3802,7 @@ class MainWindow(QMainWindow):
         item = self.items.get(index)
         if item is not None and index < len(self.shots):
             self._fill_top(item, index, self.shots[index])
+            self._apply_tree_filter()
 
     def _on_expanded(self, item: QTreeWidgetItem):
         name = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
@@ -3917,6 +4150,7 @@ class MainWindow(QMainWindow):
             "kitsu": self._kitsu_config,
             "kitsu_project_id": self._kitsu_project_id,
             "project_presets": self._project_presets,
+            "gemini_api_key": self._gemini_api_key,
             "shots": [
                 {"name": s.name, "frames": s.frames, "seq": s.seq, "state": s.state,
                  "done": s.done, "force_overwrite": s.force_overwrite,
@@ -3971,6 +4205,7 @@ class MainWindow(QMainWindow):
         presets = data.get("project_presets")
         if isinstance(presets, dict):
             self._project_presets = presets
+        self._gemini_api_key = str(data.get("gemini_api_key") or "")
         consistent = data.get("consistent_path")
         if consistent is None:
             consistent = (data.get("current_mode", MODE_LOCAL) == MODE_LOCAL)
