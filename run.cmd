@@ -1,6 +1,6 @@
 @echo off
 REM Data Kitsu Tools launcher for Windows.
-REM Verifies Python & PySide6 once a week (or on launch error / --check).
+REM Launches immediately; checks/repairs Python & PySide6 only on error or --check.
 setlocal
 cd /d "%~dp0"
 
@@ -21,7 +21,6 @@ if /i "%~1"=="--check" (
     exit /b 0
 )
 
-%PY% launcher_check.py || (pause & exit /b 1)
 %PY% data_kitsu_tools.py
 if errorlevel 1 (
     echo App exited with an error. Running library check/repair...

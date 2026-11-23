@@ -2594,6 +2594,10 @@ class MainWindow(QMainWindow):
 
         kitsu_target_row = QHBoxLayout()
         kitsu_target_row.setSpacing(4)
+        self.chk_kitsu_target1 = QCheckBox()
+        self.chk_kitsu_target1.setChecked(True)
+        self.chk_kitsu_target1.setToolTip("Enable/disable updating this Kitsu column status on PUBLISH")
+        self.chk_kitsu_target1.toggled.connect(self._update_kitsu_publish_controls)
         self.cmb_kitsu_task = QComboBox()
         self.cmb_kitsu_task.setEditable(True)
         self.cmb_kitsu_task.addItem("Compositing")
@@ -2602,6 +2606,7 @@ class MainWindow(QMainWindow):
         self.cmb_kitsu_status.setEditable(True)
         self.cmb_kitsu_status.addItem("ĐợiCheck")
         self.cmb_kitsu_status.setToolTip("Target Kitsu status after PUBLISH")
+        kitsu_target_row.addWidget(self.chk_kitsu_target1)
         kitsu_target_row.addWidget(self.cmb_kitsu_task, 1)
         kitsu_target_row.addWidget(QLabel("→"))
         kitsu_target_row.addWidget(self.cmb_kitsu_status, 1)
@@ -2859,8 +2864,11 @@ class MainWindow(QMainWindow):
         active = (not self._running) and (not self.chk_consistent_path.isChecked())
         self.chk_kitsu_publish.setEnabled(active)
         sub = active and self.chk_kitsu_publish.isChecked()
-        for w in (self.chk_kitsu_mp4, self.cmb_kitsu_task, self.cmb_kitsu_status, self.chk_kitsu_target2):
+        for w in (self.chk_kitsu_mp4, self.chk_kitsu_target1, self.chk_kitsu_target2):
             w.setEnabled(sub)
+        sub1 = sub and self.chk_kitsu_target1.isChecked()
+        for w in (self.cmb_kitsu_task, self.cmb_kitsu_status):
+            w.setEnabled(sub1)
         sub2 = sub and self.chk_kitsu_target2.isChecked()
         for w in (self.cmb_kitsu_task2, self.cmb_kitsu_status2):
             w.setEnabled(sub2)
@@ -3172,6 +3180,7 @@ class MainWindow(QMainWindow):
             "dailies": self.chk_dailies.isChecked(),
             "kitsu_publish": self.chk_kitsu_publish.isChecked(),
             "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
+            "kitsu_target1_enabled": self.chk_kitsu_target1.isChecked(),
             "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
             "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
             "kitsu_target2_enabled": self.chk_kitsu_target2.isChecked(),
@@ -3201,6 +3210,8 @@ class MainWindow(QMainWindow):
             self.chk_kitsu_publish.setChecked(bool(preset["kitsu_publish"]))
         if "kitsu_upload_mp4" in preset:
             self.chk_kitsu_mp4.setChecked(bool(preset["kitsu_upload_mp4"]))
+        if "kitsu_target1_enabled" in preset:
+            self.chk_kitsu_target1.setChecked(bool(preset["kitsu_target1_enabled"]))
         if preset.get("kitsu_task_type"):
             self.cmb_kitsu_task.setEditText(preset["kitsu_task_type"])
         if preset.get("kitsu_status"):
@@ -3823,12 +3834,23 @@ class MainWindow(QMainWindow):
         else:
             return
 
-        extra_targets = []
+        targets: list[tuple[str, str]] = []
+        if self.chk_kitsu_target1.isChecked():
+            t1 = self.cmb_kitsu_task.currentText().strip()
+            s1 = self.cmb_kitsu_status.currentText().strip()
+            if t1 and s1:
+                targets.append((t1, s1))
         if self.chk_kitsu_target2.isChecked():
             t2 = self.cmb_kitsu_task2.currentText().strip()
             s2 = self.cmb_kitsu_status2.currentText().strip()
             if t2 and s2:
-                extra_targets.append((t2, s2))
+                targets.append((t2, s2))
+        if not targets:
+            self.log(f"Kitsu skip ({shot.name}): no target status row enabled.", C_ORANGE)
+            return
+
+        primary_task, primary_status = targets[0]
+        extra_targets = targets[1:]
 
         worker = KitsuPublishWorker(
             client=self._kitsu_client,
@@ -3836,8 +3858,8 @@ class MainWindow(QMainWindow):
             shot=shot,
             dest_path=dest_path,
             source_files=list(unit.copy_files),
-            task_type_name=self.cmb_kitsu_task.currentText().strip() or "Compositing",
-            status_name=self.cmb_kitsu_status.currentText().strip() or "ĐợiCheck",
+            task_type_name=primary_task,
+            status_name=primary_status,
             upload_mp4=self.chk_kitsu_mp4.isChecked(),
             extra_targets=extra_targets,
         )
@@ -3878,6 +3900,7 @@ class MainWindow(QMainWindow):
             "dailies": self.chk_dailies.isChecked(),
             "kitsu_publish": self.chk_kitsu_publish.isChecked(),
             "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
+            "kitsu_target1_enabled": self.chk_kitsu_target1.isChecked(),
             "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
             "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
             "kitsu_target2_enabled": self.chk_kitsu_target2.isChecked(),
@@ -3935,6 +3958,7 @@ class MainWindow(QMainWindow):
         self.chk_dailies.setChecked(bool(data.get("dailies", False)))
         self.chk_kitsu_publish.setChecked(bool(data.get("kitsu_publish", True)))
         self.chk_kitsu_mp4.setChecked(bool(data.get("kitsu_upload_mp4", True)))
+        self.chk_kitsu_target1.setChecked(bool(data.get("kitsu_target1_enabled", True)))
         if data.get("kitsu_task_type"):
             self.cmb_kitsu_task.setEditText(str(data["kitsu_task_type"]))
         if data.get("kitsu_status"):

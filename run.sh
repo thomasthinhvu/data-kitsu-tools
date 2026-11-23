@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Data Kitsu Tools launcher for Linux and macOS.
-# Verifies Python & PySide6 once a week (or on launch error / --check).
+# Launches immediately; checks/repairs Python & PySide6 only on error or --check.
 set -e
 cd "$(dirname "$0")"
 
@@ -22,7 +22,6 @@ if [ "$1" = "--check" ] || [ "$2" = "--check" ]; then
     exit 0
 fi
 
-"$PY" launcher_check.py
 if ! "$PY" data_kitsu_tools.py; then
     echo "App exited with an error. Running library check/repair..."
     "$PY" launcher_check.py --repair
