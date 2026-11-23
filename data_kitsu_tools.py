@@ -2230,6 +2230,7 @@ class KitsuPublishWorker(QThread):
         task_type_name: str = "Compositing",
         status_name: str = "ĐợiCheck",
         upload_mp4: bool = True,
+        extra_targets: list[tuple[str, str]] | None = None,
     ):
         super().__init__()
         self.client = client
@@ -2240,6 +2241,7 @@ class KitsuPublishWorker(QThread):
         self.task_type_name = task_type_name or "Compositing"
         self.status_name = status_name or "ĐợiCheck"
         self.upload_mp4 = upload_mp4
+        self.extra_targets = list(extra_targets or [])
 
     def run(self):
         tmp_jpg: Path | None = None
@@ -2279,9 +2281,26 @@ class KitsuPublishWorker(QThread):
             if tmp_mp4:
                 extras.append("MP4 preview")
             extra_str = (" + " + " & ".join(extras)) if extras else ""
+            updated_cols = [f"{self.task_type_name} -> {self.status_name}"]
+            for ex_task, ex_status in self.extra_targets:
+                if not ex_task or not ex_status:
+                    continue
+                if ex_task.strip().lower() == self.task_type_name.strip().lower():
+                    continue
+                try:
+                    self.client.update_shot_task_on_publish(
+                        project_id=self.project_id,
+                        shot_id=shot_id,
+                        dest_path=self.dest_path,
+                        task_type_name=ex_task,
+                        status_name=ex_status,
+                    )
+                    updated_cols.append(f"{ex_task} -> {ex_status}")
+                except Exception as ex_exc:
+                    updated_cols.append(f"{ex_task} skipped ({ex_exc})")
             self.done.emit(
                 self.shot.name,
-                f"Kitsu updated: {self.shot.name} {self.task_type_name} -> {self.status_name} (path{extra_str})",
+                f"Kitsu updated: {self.shot.name} {', '.join(updated_cols)} (path{extra_str})",
             )
         except Exception as exc:
             self.failed.emit(self.shot.name, f"Kitsu update failed for {self.shot.name}: {exc}")
@@ -2588,6 +2607,26 @@ class MainWindow(QMainWindow):
         kitsu_target_row.addWidget(self.cmb_kitsu_status, 1)
         sv.addLayout(kitsu_target_row)
 
+        kitsu_target_row2 = QHBoxLayout()
+        kitsu_target_row2.setSpacing(4)
+        self.chk_kitsu_target2 = QCheckBox()
+        self.chk_kitsu_target2.setChecked(True)
+        self.chk_kitsu_target2.setToolTip("Also update a second Kitsu column (e.g. Rendering) on PUBLISH")
+        self.chk_kitsu_target2.toggled.connect(self._update_kitsu_publish_controls)
+        self.cmb_kitsu_task2 = QComboBox()
+        self.cmb_kitsu_task2.setEditable(True)
+        self.cmb_kitsu_task2.addItem("Rendering")
+        self.cmb_kitsu_task2.setToolTip("Second target Kitsu task/department column")
+        self.cmb_kitsu_status2 = QComboBox()
+        self.cmb_kitsu_status2.setEditable(True)
+        self.cmb_kitsu_status2.addItem("ĐợiCheck")
+        self.cmb_kitsu_status2.setToolTip("Second target Kitsu status after PUBLISH")
+        kitsu_target_row2.addWidget(self.chk_kitsu_target2)
+        kitsu_target_row2.addWidget(self.cmb_kitsu_task2, 1)
+        kitsu_target_row2.addWidget(QLabel("→"))
+        kitsu_target_row2.addWidget(self.cmb_kitsu_status2, 1)
+        sv.addLayout(kitsu_target_row2)
+
         types_grid = QGridLayout()
         types_grid.setSpacing(6)
         self.scan_checks: dict = {}
@@ -2820,8 +2859,11 @@ class MainWindow(QMainWindow):
         active = (not self._running) and (not self.chk_consistent_path.isChecked())
         self.chk_kitsu_publish.setEnabled(active)
         sub = active and self.chk_kitsu_publish.isChecked()
-        for w in (self.chk_kitsu_mp4, self.cmb_kitsu_task, self.cmb_kitsu_status):
+        for w in (self.chk_kitsu_mp4, self.cmb_kitsu_task, self.cmb_kitsu_status, self.chk_kitsu_target2):
             w.setEnabled(sub)
+        sub2 = sub and self.chk_kitsu_target2.isChecked()
+        for w in (self.cmb_kitsu_task2, self.cmb_kitsu_status2):
+            w.setEnabled(sub2)
 
     def _on_consistent_toggled(self, checked: bool):
         self.current_mode = MODE_LOCAL if checked else MODE_PUBLISH
@@ -3098,31 +3140,25 @@ class MainWindow(QMainWindow):
             self.kitsu_status_lbl.setStyleSheet("color: #8a8f98; font-size: 11px;")
 
     def _populate_kitsu_publish_targets(self, task_types: list[str], task_statuses: list[str]):
-        if task_types:
-            cur_task = self.cmb_kitsu_task.currentText().strip() or "Compositing"
-            self.cmb_kitsu_task.blockSignals(True)
-            self.cmb_kitsu_task.clear()
-            for tt in task_types:
-                self.cmb_kitsu_task.addItem(tt)
-            idx = self.cmb_kitsu_task.findText(cur_task, Qt.MatchFlag.MatchFixedString)
+        def _refill(cmb: QComboBox, values: list[str], fallback: str):
+            cur = cmb.currentText().strip() or fallback
+            cmb.blockSignals(True)
+            cmb.clear()
+            for v in values:
+                cmb.addItem(v)
+            idx = cmb.findText(cur, Qt.MatchFlag.MatchFixedString)
             if idx >= 0:
-                self.cmb_kitsu_task.setCurrentIndex(idx)
+                cmb.setCurrentIndex(idx)
             else:
-                self.cmb_kitsu_task.setEditText(cur_task)
-            self.cmb_kitsu_task.blockSignals(False)
+                cmb.setEditText(cur)
+            cmb.blockSignals(False)
 
+        if task_types:
+            _refill(self.cmb_kitsu_task, task_types, "Compositing")
+            _refill(self.cmb_kitsu_task2, task_types, "Rendering")
         if task_statuses:
-            cur_status = self.cmb_kitsu_status.currentText().strip() or "ĐợiCheck"
-            self.cmb_kitsu_status.blockSignals(True)
-            self.cmb_kitsu_status.clear()
-            for st in task_statuses:
-                self.cmb_kitsu_status.addItem(st)
-            idx = self.cmb_kitsu_status.findText(cur_status, Qt.MatchFlag.MatchFixedString)
-            if idx >= 0:
-                self.cmb_kitsu_status.setCurrentIndex(idx)
-            else:
-                self.cmb_kitsu_status.setEditText(cur_status)
-            self.cmb_kitsu_status.blockSignals(False)
+            _refill(self.cmb_kitsu_status, task_statuses, "ĐợiCheck")
+            _refill(self.cmb_kitsu_status2, task_statuses, "ĐợiCheck")
 
     def _save_current_project_preset(self):
         pid = self._kitsu_project_id
@@ -3138,6 +3174,12 @@ class MainWindow(QMainWindow):
             "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
             "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
             "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
+            "kitsu_target2_enabled": self.chk_kitsu_target2.isChecked(),
+            "kitsu_task_type2": self.cmb_kitsu_task2.currentText().strip(),
+            "kitsu_status2": self.cmb_kitsu_status2.currentText().strip(),
+            "kitsu_target2_enabled": self.chk_kitsu_target2.isChecked(),
+            "kitsu_task_type2": self.cmb_kitsu_task2.currentText().strip(),
+            "kitsu_status2": self.cmb_kitsu_status2.currentText().strip(),
         }
 
     def _apply_project_preset(self, project_id: str, project_name: str = ""):
@@ -3163,6 +3205,12 @@ class MainWindow(QMainWindow):
             self.cmb_kitsu_task.setEditText(preset["kitsu_task_type"])
         if preset.get("kitsu_status"):
             self.cmb_kitsu_status.setEditText(preset["kitsu_status"])
+        if "kitsu_target2_enabled" in preset:
+            self.chk_kitsu_target2.setChecked(bool(preset["kitsu_target2_enabled"]))
+        if preset.get("kitsu_task_type2"):
+            self.cmb_kitsu_task2.setEditText(preset["kitsu_task_type2"])
+        if preset.get("kitsu_status2"):
+            self.cmb_kitsu_status2.setEditText(preset["kitsu_status2"])
         self._update_kitsu_publish_controls()
         self._update_previews()
         if project_name:
@@ -3775,6 +3823,13 @@ class MainWindow(QMainWindow):
         else:
             return
 
+        extra_targets = []
+        if self.chk_kitsu_target2.isChecked():
+            t2 = self.cmb_kitsu_task2.currentText().strip()
+            s2 = self.cmb_kitsu_status2.currentText().strip()
+            if t2 and s2:
+                extra_targets.append((t2, s2))
+
         worker = KitsuPublishWorker(
             client=self._kitsu_client,
             project_id=project_id,
@@ -3784,6 +3839,7 @@ class MainWindow(QMainWindow):
             task_type_name=self.cmb_kitsu_task.currentText().strip() or "Compositing",
             status_name=self.cmb_kitsu_status.currentText().strip() or "ĐợiCheck",
             upload_mp4=self.chk_kitsu_mp4.isChecked(),
+            extra_targets=extra_targets,
         )
         worker.done.connect(lambda _name, msg: self.log(msg))
         worker.failed.connect(lambda _name, msg: self.log(msg, C_ORANGE))
@@ -3824,6 +3880,9 @@ class MainWindow(QMainWindow):
             "kitsu_upload_mp4": self.chk_kitsu_mp4.isChecked(),
             "kitsu_task_type": self.cmb_kitsu_task.currentText().strip(),
             "kitsu_status": self.cmb_kitsu_status.currentText().strip(),
+            "kitsu_target2_enabled": self.chk_kitsu_target2.isChecked(),
+            "kitsu_task_type2": self.cmb_kitsu_task2.currentText().strip(),
+            "kitsu_status2": self.cmb_kitsu_status2.currentText().strip(),
             "sound_mode": self._sfx.mode,
             "sound_volume": self.slider_vol.value(),
             "h_splitter": self.h_splitter.sizes(),
@@ -3880,6 +3939,11 @@ class MainWindow(QMainWindow):
             self.cmb_kitsu_task.setEditText(str(data["kitsu_task_type"]))
         if data.get("kitsu_status"):
             self.cmb_kitsu_status.setEditText(str(data["kitsu_status"]))
+        self.chk_kitsu_target2.setChecked(bool(data.get("kitsu_target2_enabled", True)))
+        if data.get("kitsu_task_type2"):
+            self.cmb_kitsu_task2.setEditText(str(data["kitsu_task_type2"]))
+        if data.get("kitsu_status2"):
+            self.cmb_kitsu_status2.setEditText(str(data["kitsu_status2"]))
         presets = data.get("project_presets")
         if isinstance(presets, dict):
             self._project_presets = presets
