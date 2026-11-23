@@ -1,11 +1,9 @@
 @echo off
 REM Data Kitsu Tools launcher for Windows.
-REM Checks Python and PySide6, installs missing requirements, then starts the GUI.
-REM Pass --check to only run the checks (no GUI).
+REM Verifies Python & PySide6 once a week (or on launch error / --check).
 setlocal
 cd /d "%~dp0"
 
-echo [1/3] Checking Python...
 set "PY="
 where py >nul 2>nul && set "PY=py -3"
 if not defined PY (
@@ -16,33 +14,18 @@ if not defined PY (
     pause
     exit /b 1
 )
-%PY% -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" || (
-    echo ERROR: Python 3.9 or newer is required.
-    %PY% --version
-    pause
-    exit /b 1
-)
-for /f "delims=" %%v in ('%PY% --version') do echo       OK: %%v
-
-echo [2/3] Checking PySide6...
-%PY% -c "import PySide6" >nul 2>nul
-if errorlevel 1 (
-    echo       PySide6 not found, installing from requirements.txt ...
-    %PY% -m pip install --user -r requirements.txt
-    %PY% -c "import PySide6" >nul 2>nul
-    if errorlevel 1 (
-        echo ERROR: PySide6 installation failed.
-        pause
-        exit /b 1
-    )
-)
-echo       OK: PySide6 is installed
 
 if /i "%~1"=="--check" (
+    %PY% launcher_check.py --check || (pause & exit /b 1)
     echo [3/3] All checks passed ^(--check mode, GUI not started^).
     exit /b 0
 )
 
-echo [3/3] Starting Data Kitsu Tools...
+%PY% launcher_check.py || (pause & exit /b 1)
 %PY% data_kitsu_tools.py
+if errorlevel 1 (
+    echo App exited with an error. Running library check/repair...
+    %PY% launcher_check.py --repair || (pause & exit /b 1)
+    %PY% data_kitsu_tools.py
+)
 endlocal
