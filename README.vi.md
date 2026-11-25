@@ -96,6 +96,11 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-25]
+  - **Version 2.10:**
+    - **Publish Revision & cập nhật đa cột Kitsu:** chuyển upload hình/video lên Kitsu sang chuẩn **Publish Revision** (`add-preview` + `set-main-preview`, tự render MP4 qua `ffmpeg` hoặc JPG frame 1), cho chọn cột/trạng thái đích với 2 dòng độc lập có checkbox (`Compositing → ĐợiCheck` và `Rendering → ĐợiCheck`), và thêm **Update Kitsu Now** trong menu chuột phải.
+    - **Kéo thả từ Explorer & Preset theo Project:** tự khôi phục phiên Kitsu khi mở app, tự khớp tên folder kéo thả từ Explorer (kể cả tên có `_vNN` / reel tag) với shot trên Kitsu bằng `ShotIndex`, và tự lưu preset riêng cho từng Project Kitsu.
+    - **Giao diện SCAN thống nhất & linh hoạt:** gộp `LOCAL`/`PUBLISH` thành **SCAN** + **Consitant path**, thêm nút đảo đường dẫn `⇅`, kéo giãn khung & cột tự do, tooltip hiện `Source`/`Destination`, menu **Open Source** / **Open Destination**, thanh lọc nhanh trên `SHOTS LIST`, gợi ý folder gần giống / folder cha + **Use suggested folder**, âm thanh **8-bit / 16-bit** kèm thanh âm lượng, OCR hỗ trợ **RapidOCR / Gemini Vision** + `Ctrl+V` chọn cột, và khởi động nhanh (chỉ kiểm tra thư viện khi lỗi).
 - [26-11-20]
   - **Version 2.0.0:**
     - **Kết nối Kitsu trực tiếp (`KITSU...`):** đăng nhập server Kitsu bằng Email/Password (hỗ trợ 2FA) hoặc API Token, duyệt Project, Episode, Sequence và nạp danh sách shot trực tiếp không cần xuất CSV thủ công.

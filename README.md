@@ -88,6 +88,11 @@ python3 data_kitsu_tools.py
 
 ## My Modification update
 
+- [26-11-25]
+  - **Version 2.10:**
+    - **Publish Revision & multi-column Kitsu updates:** switched Kitsu preview uploads from comment attachments to official **Publish Revision** (`add-preview` + `set-main-preview`, supporting MP4 preview via `ffmpeg` or frame-1 JPG), added selectable department/status target rows (`Compositing → ĐợiCheck` and `Rendering → ĐợiCheck` with individual enable checkboxes), and added **Update Kitsu Now** in the shot context menu.
+    - **Explorer drag-and-drop & project presets:** restored saved Kitsu sessions on startup, auto-matched dropped Explorer folders (including versioned/reel-tagged names) to Kitsu shots via `ShotIndex`, and saved per-project Kitsu presets (`COPY FROM`, `PASTE TO`, file types, and target columns).
+    - **Unified SCAN UI & flexible layout:** merged `LOCAL`/`PUBLISH` into **SCAN** + **Consitant path**, added the `⇅` path swap button, resizable splitters and columns, `Source`/`Destination` hover tooltips, **Open Source** / **Open Destination** context menu, main shot-list filter bar (`All`/`Ready`/`Mismatch`/`Missing`/`Done`), near-miss/parent folder hints + **Use suggested folder**, **8-bit / 16-bit SFX** with volume slider, **RapidOCR / Gemini Vision** OCR + `Ctrl+V` column picker, and instant startup (repair-on-error launcher).
 - [26-11-20]
   - **Version 2.0.0:**
     - **Direct Kitsu integration (`KITSU...`):** connect to a Kitsu server via Email/Password (with optional 2FA) or API Token, browse Projects, Episodes, Sequences, and fetch shots directly into the shot list without exporting a CSV first.

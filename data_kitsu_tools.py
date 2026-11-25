@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Data Kitsu Tools"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.10"
 WINDOWS_PATH_LIMIT = 250        # warn above this destination path length (Windows MAX_PATH is 260)
 PATH_HISTORY_MAX = 10          # recent COPY FROM / PASTE TO paths kept (shared)
 WALLET_BSC = "0x5517244f04a4b769224f1489cd41d3b70171161d"
@@ -2321,11 +2321,29 @@ class KitsuPublishWorker(QThread):
         try:
             shot_id = self.shot.kitsu_id
             if not shot_id:
-                for rec in self.client.get_shots(self.project_id, include_tasks=False):
+                kitsu_records = self.client.get_shots(self.project_id, include_tasks=False)
+                name_to_id: dict[str, str] = {}
+                for rec in kitsu_records:
+                    rid = str(rec.get("id") or "")
+                    if not rid:
+                        continue
+                    raw_name = str(rec.get("name") or "").strip()
+                    if raw_name:
+                        name_to_id[raw_name] = rid
                     converted = shots_from_kitsu([rec])
-                    if rec.get("name") == self.shot.name or (converted and converted[0].name == self.shot.name):
-                        shot_id = str(rec.get("id") or "")
-                        break
+                    if converted and converted[0].name:
+                        name_to_id[converted[0].name] = rid
+
+                if self.shot.name in name_to_id:
+                    shot_id = name_to_id[self.shot.name]
+                elif name_to_id:
+                    matched_names = ShotIndex(list(name_to_id.keys())).match_folder(self.shot.name)
+                    if len(matched_names) == 1:
+                        shot_id = name_to_id[matched_names[0]]
+                    elif matched_names:
+                        # Prefer longest matching shot name
+                        best_name = max(matched_names, key=len)
+                        shot_id = name_to_id[best_name]
             if not shot_id:
                 raise kitsu_client.KitsuError("Shot not found in Kitsu project.")
 
@@ -3372,10 +3390,23 @@ class MainWindow(QMainWindow):
             if p.is_dir():
                 if p.name in known:
                     continue
-                frames = len(direct_files(p, (), True))
+                if not self.copy_edit.text().strip():
+                    self.copy_edit.setText(str(p.parent))
+                direct_cnt = len(direct_files(p, (), True))
+                if direct_cnt > 0:
+                    frames: int | None = direct_cnt
+                else:
+                    sub_counts = [
+                        len(direct_files(Path(dp) / d, (), True))
+                        for dp, dns, _ in os.walk(p)
+                        for d in dns
+                        if not is_system_name(d)
+                    ]
+                    best_sub = max(sub_counts, default=0)
+                    frames = best_sub if best_sub > 0 else None
                 self.shots.append(Shot(name=p.name, frames=frames))
                 known.add(p.name)
-                self.log(f"Added shot folder {p.name} ({frames} frames)")
+                self.log(f"Added shot folder {p.name} ({frames_text(frames)} frames)")
             elif p.suffix.lower() in (".csv", ".xlsx", ".xlsm", ".xls", ".png", ".jpg", ".jpeg"):
                 self.load_import_path(p, replace=False)
         self.refresh_tree()
@@ -4270,6 +4301,15 @@ class MainWindow(QMainWindow):
         kitsu_cfg = data.get("kitsu")
         if isinstance(kitsu_cfg, dict):
             self._kitsu_config = kitsu_cfg
+            if kitsu_cfg.get("url") and kitsu_cfg.get("session_tokens"):
+                try:
+                    self._kitsu_client.set_host(
+                        kitsu_cfg["url"],
+                        verify_ssl=bool(kitsu_cfg.get("verify_ssl", True)),
+                    )
+                    self._kitsu_client.set_token(kitsu_cfg["session_tokens"])
+                except Exception:
+                    pass
         self._kitsu_project_id = str(data.get("kitsu_project_id") or self._kitsu_config.get("project_id") or "")
         self._update_kitsu_badge()
         self.refresh_tree()
