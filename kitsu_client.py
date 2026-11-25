@@ -623,15 +623,19 @@ class KitsuClient:
         task_id: str,
         comment_id: str,
         preview_path: str | Path,
+        revision: int | None = None,
         set_main: bool = True,
     ) -> dict[str, Any]:
-        """Create and upload an MP4/image preview onto a Kitsu task comment."""
+        """Create and upload a Revision preview (MP4 or JPG) onto a Kitsu task comment."""
         tid = urllib.parse.quote(str(task_id), safe="")
         cid = urllib.parse.quote(str(comment_id), safe="")
+        body: dict[str, Any] = {}
+        if revision is not None:
+            body["revision"] = int(revision)
         preview_obj = self._request(
             "POST",
             f"actions/tasks/{tid}/comments/{cid}/add-preview",
-            payload={},
+            payload=body,
         )
         if not isinstance(preview_obj, dict) or not preview_obj.get("id"):
             return {}
@@ -649,10 +653,10 @@ class KitsuClient:
         task_id: str,
         task_status_id: str,
         comment: str = "",
-        attachment_path: str | Path | None = None,
         preview_path: str | Path | None = None,
+        revision: int | None = None,
     ) -> dict[str, Any]:
-        """Post a comment (and status update) on a Kitsu task, with optional attachment/preview."""
+        """Post a comment + status update on a Kitsu task and publish a Revision preview."""
         tid = urllib.parse.quote(str(task_id), safe="")
         payload = {
             "task_status_id": task_status_id,
@@ -663,14 +667,10 @@ class KitsuClient:
         created = self._request("POST", f"actions/tasks/{tid}/comment", payload=payload)
         if isinstance(created, dict) and created.get("id"):
             cid = str(created["id"])
-            if attachment_path and Path(attachment_path).is_file():
-                cid_q = urllib.parse.quote(cid, safe="")
-                self._upload_multipart(
-                    f"actions/tasks/{tid}/comments/{cid_q}/add-attachment",
-                    Path(attachment_path),
-                )
             if preview_path and Path(preview_path).is_file():
-                self.add_preview(str(task_id), cid, Path(preview_path), set_main=True)
+                self.add_preview(
+                    str(task_id), cid, Path(preview_path), revision=revision, set_main=True
+                )
         return created if isinstance(created, dict) else {}
 
     def update_shot_task_on_publish(
@@ -680,10 +680,10 @@ class KitsuClient:
         dest_path: str,
         task_type_name: str = "Compositing",
         status_name: str = "ĐợiCheck",
-        attachment_path: str | Path | None = None,
         preview_path: str | Path | None = None,
+        revision: int | None = None,
     ) -> dict[str, Any]:
-        """Change a shot's task status and post destination path + optional JPG/MP4 preview."""
+        """Change a shot's task status and publish destination path + Revision preview."""
         if not shot_id:
             raise KitsuError("Shot has no Kitsu ID.")
         task_types = self.get_task_types(project_id)
@@ -709,6 +709,6 @@ class KitsuClient:
             task_id=str(target_task["id"]),
             task_status_id=str(status_obj["id"]),
             comment=str(dest_path),
-            attachment_path=attachment_path,
             preview_path=preview_path,
+            revision=revision,
         )

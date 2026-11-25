@@ -23,7 +23,9 @@ import shot_import as si
 
 class _MockKitsuHandler(BaseHTTPRequestHandler):
     posted_comments: list[dict] = []
-    uploaded_attachments: list[bytes] = []
+    created_previews: list[dict] = []
+    uploaded_previews: list[bytes] = []
+    main_previews: list[str] = []
 
     def log_message(self, format, *args):  # noqa: A002
         return
@@ -68,11 +70,24 @@ class _MockKitsuHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"id": "cmt_1", "text": data.get("comment", "")})
             return
 
-        if self.path == "/api/actions/tasks/t_comp_1/comments/cmt_1/add-attachment":
-            self.__class__.uploaded_attachments.append(raw)
-            self._send_json(200, {"id": "att_1"})
+        if self.path == "/api/actions/tasks/t_comp_1/comments/cmt_1/add-preview":
+            data = json.loads(raw.decode("utf-8") or "{}")
+            self.__class__.created_previews.append(data)
+            self._send_json(200, {"id": "prev_1"})
             return
 
+        if self.path == "/api/pictures/preview-files/prev_1":
+            self.__class__.uploaded_previews.append(raw)
+            self._send_json(200, {"id": "prev_1"})
+            return
+
+        self._send_json(404, {"message": "Not found"})
+
+    def do_PUT(self):  # noqa: N802
+        if self.path == "/api/actions/preview-files/prev_1/set-main-preview":
+            self.__class__.main_previews.append("prev_1")
+            self._send_json(200, {"id": "prev_1"})
+            return
         self._send_json(404, {"message": "Not found"})
 
     def do_GET(self):  # noqa: N802
@@ -207,7 +222,9 @@ class KitsuClientTests(unittest.TestCase):
 
     def test_login_fetch_tasks_and_publish_update(self):
         _MockKitsuHandler.posted_comments.clear()
-        _MockKitsuHandler.uploaded_attachments.clear()
+        _MockKitsuHandler.created_previews.clear()
+        _MockKitsuHandler.uploaded_previews.clear()
+        _MockKitsuHandler.main_previews.clear()
 
         client = kc.KitsuClient(self.base_url)
         self.assertTrue(client.host_is_up())
@@ -248,14 +265,17 @@ class KitsuClientTests(unittest.TestCase):
                 project_id="p1",
                 shot_id="s1",
                 dest_path=r"W:\PUBLISH\261120\R1_SC03_010",
-                attachment_path=captured,
+                preview_path=captured,
+                revision=3,
             )
 
         self.assertEqual(len(_MockKitsuHandler.posted_comments), 1)
         self.assertEqual(_MockKitsuHandler.posted_comments[0]["task_status_id"], "st_dc")
         self.assertIn(r"W:\PUBLISH\261120\R1_SC03_010", _MockKitsuHandler.posted_comments[0]["comment"])
-        self.assertEqual(len(_MockKitsuHandler.uploaded_attachments), 1)
-        self.assertIn(b"frame1.jpg", _MockKitsuHandler.uploaded_attachments[0])
+        self.assertEqual(_MockKitsuHandler.created_previews, [{"revision": 3}])
+        self.assertEqual(len(_MockKitsuHandler.uploaded_previews), 1)
+        self.assertIn(b"frame1.jpg", _MockKitsuHandler.uploaded_previews[0])
+        self.assertEqual(_MockKitsuHandler.main_previews, ["prev_1"])
 
     def test_token_refresh_on_401(self):
         client = kc.KitsuClient(self.base_url)

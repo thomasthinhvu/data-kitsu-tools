@@ -2318,8 +2318,6 @@ class KitsuPublishWorker(QThread):
         self.extra_targets = list(extra_targets or [])
 
     def run(self):
-        tmp_jpg: Path | None = None
-        tmp_mp4: Path | None = None
         try:
             shot_id = self.shot.kitsu_id
             if not shot_id:
@@ -2331,30 +2329,40 @@ class KitsuPublishWorker(QThread):
             if not shot_id:
                 raise kitsu_client.KitsuError("Shot not found in Kitsu project.")
 
+            revision: int | None = None
+            if self.shot.scan and self.shot.scan.version_text:
+                m_ver = re.search(r"v(\d+)", self.shot.scan.version_text, re.IGNORECASE)
+                if m_ver:
+                    revision = int(m_ver.group(1))
+
             with tempfile.TemporaryDirectory(prefix="dkt_thumb_") as td:
                 td_path = Path(td)
-                tmp_jpg = shot_import.capture_first_frame_jpg(
-                    self.source_files, td_path / f"{self.shot.name}_frame1.jpg"
-                )
+                preview_file: Path | None = None
+                preview_kind = ""
                 if self.upload_mp4:
-                    tmp_mp4 = shot_import.render_preview_mp4(
+                    preview_file = shot_import.render_preview_mp4(
                         self.source_files, td_path / f"{self.shot.name}_preview.mp4"
                     )
+                    if preview_file:
+                        preview_kind = "MP4 revision"
+                if preview_file is None:
+                    preview_file = shot_import.capture_first_frame_jpg(
+                        self.source_files, td_path / f"{self.shot.name}_frame1.jpg"
+                    )
+                    if preview_file:
+                        preview_kind = "JPG revision"
+
                 self.client.update_shot_task_on_publish(
                     project_id=self.project_id,
                     shot_id=shot_id,
                     dest_path=self.dest_path,
                     task_type_name=self.task_type_name,
                     status_name=self.status_name,
-                    attachment_path=tmp_jpg,
-                    preview_path=tmp_mp4,
+                    preview_path=preview_file,
+                    revision=revision,
                 )
-            extras = []
-            if tmp_jpg:
-                extras.append("frame 1 JPG")
-            if tmp_mp4:
-                extras.append("MP4 preview")
-            extra_str = (" + " + " & ".join(extras)) if extras else ""
+            rev_note = f" v{revision:02d}" if revision is not None else ""
+            extra_str = f" + {preview_kind}{rev_note}" if preview_kind else ""
             updated_cols = [f"{self.task_type_name} -> {self.status_name}"]
             for ex_task, ex_status in self.extra_targets:
                 if not ex_task or not ex_status:
